@@ -16,6 +16,9 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import AuthScreen from '../components/AuthScreen';
+import { AppHeader } from '../components/app-header';
+import { DatePicker } from '../components/date-picker';
+import { formatDateLabel, toDateInput } from '../lib/calendar';
 import { supabase } from '../../lib/supabase';
 
 type Profile = {
@@ -23,6 +26,7 @@ type Profile = {
   full_name: string;
   role: 'parent' | 'kid';
   family_code: string;
+  birthday: string | null;
 };
 
 type ChoreTemplate = {
@@ -69,6 +73,8 @@ export default function HomeScreen() {
   const [kids, setKids] = useState<Profile[]>([]);
   const [members, setMembers] = useState<Profile[]>([]);
   const [memberToRemove, setMemberToRemove] = useState<Profile | null>(null);
+  const [birthdayMemberId, setBirthdayMemberId] = useState<string | null>(null);
+  const [birthdayBusy, setBirthdayBusy] = useState(false);
   const [memberError, setMemberError] = useState('');
   const [memberBusy, setMemberBusy] = useState(false);
   const [choreError, setChoreError] = useState(false);
@@ -190,6 +196,28 @@ export default function HomeScreen() {
       await Promise.all([fetchMembers(profile.family_code), fetchChores(profile), fetchRedemptions(profile)]);
     }
     setMemberBusy(false);
+  }
+
+  async function handleSetBirthday(member: Profile, date: Date | null) {
+    if (!profile) return;
+    setBirthdayBusy(true);
+    setMemberError('');
+    const { error } = await supabase.rpc('set_family_birthday', {
+      member_id: member.id,
+      birthday: date ? toDateInput(date) : null,
+    });
+    if (error) {
+      setMemberError(
+        ['PGRST202', 'PGRST205'].includes(error.code ?? '')
+          ? 'Birthdays need the family calendar birthday update applied first.'
+          : error.message
+      );
+    }
+    setBirthdayBusy(false);
+    if (!error) {
+      setBirthdayMemberId(null);
+      await fetchMembers(profile.family_code);
+    }
   }
 
   async function fetchTemplates(familyCode: string) {
@@ -573,35 +601,11 @@ export default function HomeScreen() {
 
   const dashboardHeader = (
     <>
-      <View style={styles.brandRow}>
-        <View style={styles.brandMark}><Text style={styles.brandMarkText}>✓</Text></View>
-        <Text style={styles.brandName}>chore<Text style={styles.brandAccent}>tracker</Text></Text>
-        <TouchableOpacity style={styles.signOutBtn} onPress={async () => { await supabase.auth.signOut(); router.replace('/'); }}>
-          <Text style={styles.signOutText}>Sign out</Text>
-        </TouchableOpacity>
-      </View>
-      <View style={styles.mainNav}>
-        {([
-          { key: 'dashboard', label: 'Overview', href: '/' },
-          { key: 'chores', label: 'Chores', href: '/?section=chores' },
-          { key: 'prizes', label: 'Prizes', href: '/?section=prizes' },
-          ...(profile.role === 'parent' ? [{ key: 'setup', label: 'Family setup', href: '/?section=setup' as const }] : []),
-        ] as const).map((item) => (
-          <Link key={item.key} href={item.href} asChild>
-            <TouchableOpacity accessibilityRole="link" style={StyleSheet.flatten([styles.mainNavItem, section === item.key && styles.mainNavItemActive])}>
-              <Text style={[styles.mainNavText, section === item.key && styles.mainNavTextActive]}>{item.label}</Text>
-            </TouchableOpacity>
-          </Link>
-        ))}
-      </View>
-      <View style={styles.topBar}>
-        <View style={styles.greeting}>
-          <Text style={styles.eyebrow}>{section === 'dashboard' ? 'YOUR FAMILY DASHBOARD' : 'CHORETRACKER / ' + section?.toUpperCase()}</Text>
-          <Text style={styles.header}>{section === 'dashboard' ? `Hey, ${profile.full_name}` : section === 'chores' ? 'Chore board' : section === 'prizes' ? 'Prizes' : 'Family setup'}</Text>
-          <Text style={styles.headerSub}>{section === 'dashboard' ? 'Here’s what’s happening at home.' : section === 'chores' ? 'Keep the household moving, one chore at a time.' : section === 'prizes' ? 'See what everyone is working toward.' : 'Manage the people and defaults behind your family.'}</Text>
-        </View>
-        <View style={styles.familyPill}><Text style={styles.familyTag}>{profile.role === 'parent' ? 'PARENT' : 'KID'}</Text></View>
-      </View>
+      <AppHeader
+        fullName={profile.full_name}
+        role={profile.role}
+        section={section === 'chores' || section === 'prizes' || section === 'setup' ? section : 'dashboard'}
+      />
 
       {section === 'dashboard' && (
         <>
@@ -675,10 +679,43 @@ export default function HomeScreen() {
             <View>
               <Text style={styles.inviteHelp}>Removing someone separates their account from this family. Their old chores and prize history remain here. They can no longer access this family; rejoining with that account requires administrator help.</Text>
               {!!memberError && <Text style={styles.inviteError}>{memberError}</Text>}
-              {members.map((member) => <View key={member.id} style={styles.claimRow}>
-                <View style={{ flex: 1 }}><Text style={styles.claimTitle}>{member.full_name}{member.id === profile.id ? ' (you)' : ''}</Text><Text style={styles.claimSub}>{member.role === 'parent' ? 'Parent' : 'Kid'}</Text></View>
-                {member.id !== profile.id && <TouchableOpacity style={styles.removeBtn} onPress={() => { setMemberToRemove(member); setMemberError(''); }}><Text style={styles.removeBtnText}>Remove</Text></TouchableOpacity>}
-              </View>)}
+              {members.map((member) => (
+                <View key={member.id} style={styles.memberCard}>
+                  <View style={styles.memberRow}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.claimTitle}>{member.full_name}{member.id === profile.id ? ' (you)' : ''}</Text>
+                      <Text style={styles.claimSub}>{member.role === 'parent' ? 'Parent' : 'Kid'}</Text>
+                      <Text style={styles.claimSub}>
+                        {member.birthday
+                          ? `Birthday: ${formatDateLabel(new Date(`${member.birthday}T00:00:00`))}`
+                          : 'No birthday set'}
+                      </Text>
+                    </View>
+                    <TouchableOpacity
+                      style={styles.birthdayBtn}
+                      onPress={() => setBirthdayMemberId((current) => (current === member.id ? null : member.id))}>
+                      <Text style={styles.birthdayBtnText}>{member.birthday ? 'Change' : 'Set birthday'}</Text>
+                    </TouchableOpacity>
+                    {member.id !== profile.id && (
+                      <TouchableOpacity style={styles.removeBtn} onPress={() => { setMemberToRemove(member); setMemberError(''); }}>
+                        <Text style={styles.removeBtnText}>Remove</Text>
+                      </TouchableOpacity>
+                    )}
+                  </View>
+                  {birthdayMemberId === member.id && (
+                    <View>
+                      <DatePicker
+                        label={`${member.full_name}’s birthday`}
+                        value={member.birthday ? new Date(`${member.birthday}T00:00:00`) : null}
+                        onChange={(date) => handleSetBirthday(member, date)}
+                        onClear={member.birthday ? () => handleSetBirthday(member, null) : undefined}
+                      />
+                      {birthdayBusy && <Text style={styles.inviteHelp}>Saving…</Text>}
+                      <Text style={styles.inviteHelp}>Birthdays appear in the family calendar every year.</Text>
+                    </View>
+                  )}
+                </View>
+              ))}
               {memberToRemove && <View style={styles.confirmBox}>
                 <Text style={styles.claimTitle}>Remove {memberToRemove.full_name} from your family?</Text>
                 <Text style={styles.inviteHelp}>All unused family invitations will be revoked. This does not delete their account.</Text>
@@ -1102,6 +1139,10 @@ const styles = StyleSheet.create({
   removeBtn: { backgroundColor: '#3B2724', paddingHorizontal: 12, paddingVertical: 10, borderRadius: 9 },
   removeBtnText: { color: '#F08A72', fontSize: 12, fontWeight: '700' },
   confirmBox: { backgroundColor: '#3A3324', padding: 14, borderRadius: 12, marginTop: 12 },
+  memberCard: { backgroundColor: '#172A31', borderRadius: 10, padding: 12, marginBottom: 8 },
+  memberRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  birthdayBtn: { backgroundColor: '#20343C', paddingHorizontal: 10, paddingVertical: 8, borderRadius: 8 },
+  birthdayBtnText: { color: '#A9C0C6', fontSize: 11, fontWeight: '700' },
   brandRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 22, borderBottomWidth: 1, borderBottomColor: '#2E4750' },
   brandMark: { width: 34, height: 34, borderRadius: 12, backgroundColor: '#0F1E25', justifyContent: 'center', alignItems: 'center', marginRight: 9 },
   brandMarkText: { color: '#FFFFFF', fontSize: 19, fontWeight: '800' },
