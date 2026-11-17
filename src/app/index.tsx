@@ -18,7 +18,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import AuthScreen from '../components/AuthScreen';
 import { AppHeader } from '../components/app-header';
 import { DatePicker } from '../components/date-picker';
-import { formatDateLabel, toDateInput } from '../lib/calendar';
+import { combineDateAndTime, formatDateLabel, startOfDay, toDateInput } from '../lib/calendar';
 import { supabase } from '../../lib/supabase';
 
 type Profile = {
@@ -43,6 +43,9 @@ type Chore = {
   assigned_to: string;
   assigned_to_id: string | null;
   points: number;
+  base_points: number | null;
+  due_at: string | null;
+  submitted_at: string | null;
   is_completed: boolean;
   status: 'pending' | 'submitted' | 'approved' | 'denied';
   before_photo_url: string | null;
@@ -100,6 +103,8 @@ export default function HomeScreen() {
   // Parent chore assignment states
   const [selectedTemplateId, setSelectedTemplateId] = useState<number | null>(null);
   const [pointsInput, setPointsInput] = useState('10');
+  const [dueDate, setDueDate] = useState(() => startOfDay(new Date()));
+  const [dueTime, setDueTime] = useState('18:00');
   const [selectedKidId, setSelectedKidId] = useState<string>('');
 
   // New chore template states
@@ -278,6 +283,24 @@ export default function HomeScreen() {
     if (data) setRedemptions(data);
   }
 
+  // A chore earns its full value when finished by the due time, and half
+  // when finished after it. The database applies the same rule on approval.
+  function choreFullPoints(chore: Chore) {
+    return chore.base_points ?? chore.points;
+  }
+
+  function choreFinishedLate(chore: Chore) {
+    if (!chore.due_at || !chore.submitted_at) return false;
+    return new Date(chore.submitted_at).getTime() > new Date(chore.due_at).getTime();
+  }
+
+  function formatChoreDue(chore: Chore) {
+    if (!chore.due_at) return null;
+    const due = new Date(chore.due_at);
+    if (Number.isNaN(due.getTime())) return null;
+    return due.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+  }
+
   function formatAssignedDate(dateString?: string) {
     if (!dateString) return '';
     const date = new Date(dateString);
@@ -381,12 +404,16 @@ export default function HomeScreen() {
     const assignedPoints = Number(pointsInput);
     if (!pointsInput.trim() || !Number.isInteger(assignedPoints) || assignedPoints < 0) { setOperationError('Enter a valid non-negative point value.'); return; }
 
+    const dueAt = combineDateAndTime(dueDate, dueTime);
+    if (!dueAt) { setOperationError('Enter the due time as HH:MM, for example 18:00.'); return; }
+
     const { error } = await supabase.from('chores').insert({
       title: chosenTemplate.title,
       assigned_to: chosenKid.full_name,
       assigned_to_id: chosenKid.id,
       family_code: profile.family_code,
       points: assignedPoints,
+      due_at: dueAt.toISOString(),
       is_completed: false,
       status: 'pending',
     });
@@ -395,6 +422,23 @@ export default function HomeScreen() {
       fetchChores(profile);
       setChorePage('todo');
       setOperationError('');
+      router.push({
+        pathname: '/chore-assigned',
+        params: {
+          chore: chosenTemplate.title,
+          kid: chosenKid.full_name,
+          points: String(assignedPoints),
+          due: dueAt.toLocaleString('en-US', {
+            weekday: 'short',
+            month: 'short',
+            day: 'numeric',
+            hour: 'numeric',
+            minute: '2-digit',
+          }),
+        },
+      });
+    } else if (error.code === 'PGRST204') {
+      setOperationError('Due dates need the chore due date database update applied first.');
     } else setOperationError(error.message);
   }
 
@@ -788,6 +832,23 @@ export default function HomeScreen() {
                 ))}
               </View>
 
+              <Text style={styles.label}>4. Due Date &amp; Time:</Text>
+              <DatePicker
+                label="Due date"
+                value={dueDate}
+                onChange={setDueDate}
+                minimum={startOfDay(new Date())}
+              />
+              <Text style={styles.label}>Due time (24-hour)</Text>
+              <TextInput
+                style={styles.input}
+                placeholder="18:00"
+                placeholderTextColor="#7E979E"
+                value={dueTime}
+                onChangeText={setDueTime}
+              />
+              <Text style={styles.inviteHelp}>Chores finished after the due time earn half points.</Text>
+
               <TouchableOpacity style={styles.addBtn} onPress={handleAssignChore}>
                 <Text style={styles.addBtnText}>Assign Chore</Text>
               </TouchableOpacity>
@@ -992,6 +1053,10 @@ export default function HomeScreen() {
             renderItem={({ item }) => {
               const isSubmitted = item.status === 'submitted';
               const isApproved = item.status === 'approved';
+              const dueLabel = formatChoreDue(item);
+              const finishedLate = choreFinishedLate(item);
+              const fullPoints = choreFullPoints(item);
+              const expectedPoints = finishedLate ? Math.floor(fullPoints / 2) : fullPoints;
 
               return (
                 <View style={[styles.card, isSubmitted && styles.submittedCard]}>
@@ -1003,9 +1068,15 @@ export default function HomeScreen() {
                       <Text style={styles.subtitle}>
                         Assigned to: {item.assigned_to} • 📅 {formatAssignedDate(item.created_at)}
                       </Text>
+                      {!!dueLabel && (
+                        <View style={styles.dueRow}>
+                          <Text style={styles.dueText}>Due {dueLabel}</Text>
+                          {finishedLate && <Text style={styles.lateTag}>Late · half points</Text>}
+                        </View>
+                      )}
                     </View>
                     <View style={styles.badge}>
-                      <Text style={styles.points}>{item.points} pts</Text>
+                      <Text style={styles.points}>{isApproved ? item.points : fullPoints} pts</Text>
                     </View>
                   </View>
 
@@ -1066,7 +1137,7 @@ export default function HomeScreen() {
                         onPress={() => handleApproveChore(item)}
                       >
                         <Text style={styles.approveBtnText}>
-                          ✓ Approve (+{item.points} pts)
+                          ✓ Approve (+{expectedPoints} pts{finishedLate ? ', late' : ''})
                         </Text>
                       </TouchableOpacity>
                       <TouchableOpacity
@@ -1093,7 +1164,9 @@ export default function HomeScreen() {
                   {chorePage === 'approved' && (
                     <View style={styles.approvedFooter}>
                       <Text style={styles.approvedFooterText}>
-                        ✅ Approved • {item.points} pts awarded
+                        {finishedLate
+                          ? `✅ Approved • ${item.points} pts awarded (half of ${fullPoints}, finished late)`
+                          : `✅ Approved • ${item.points} pts awarded`}
                       </Text>
                     </View>
                   )}
@@ -1138,6 +1211,9 @@ const styles = StyleSheet.create({
   quickLinkDescription: { color: '#A9C0C6', fontSize: 12, marginTop: 5 },
   removeBtn: { backgroundColor: '#3B2724', paddingHorizontal: 12, paddingVertical: 10, borderRadius: 9 },
   removeBtnText: { color: '#F08A72', fontSize: 12, fontWeight: '700' },
+  dueRow: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 8, marginTop: 7 },
+  dueText: { color: '#A9C0C6', fontSize: 12 },
+  lateTag: { backgroundColor: '#3B2724', color: '#F08A72', fontSize: 10, fontWeight: '800', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 20, overflow: 'hidden' },
   confirmBox: { backgroundColor: '#3A3324', padding: 14, borderRadius: 12, marginTop: 12 },
   memberCard: { backgroundColor: '#172A31', borderRadius: 10, padding: 12, marginBottom: 8 },
   memberRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
