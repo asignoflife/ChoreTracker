@@ -1,12 +1,12 @@
 import { Session } from '@supabase/supabase-js';
 import * as ImagePicker from 'expo-image-picker';
+import { Link, router, useLocalSearchParams } from 'expo-router';
 import React, { useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
   FlatList,
   Image,
-  SafeAreaView,
   ScrollView,
   StyleSheet,
   Text,
@@ -14,6 +14,7 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import AuthScreen from '../components/AuthScreen';
 import { supabase } from '../../lib/supabase';
 
@@ -66,6 +67,14 @@ export default function HomeScreen() {
   const [session, setSession] = useState<Session | null>(null);
   const [profile, setProfile] = useState<Profile | null>(null);
   const [kids, setKids] = useState<Profile[]>([]);
+  const [members, setMembers] = useState<Profile[]>([]);
+  const [memberToRemove, setMemberToRemove] = useState<Profile | null>(null);
+  const [memberError, setMemberError] = useState('');
+  const [memberBusy, setMemberBusy] = useState(false);
+  const [choreError, setChoreError] = useState(false);
+  const [redemptionError, setRedemptionError] = useState(false);
+  const { section: sectionParam } = useLocalSearchParams<{ section?: string }>();
+  const section = ['chores', 'prizes', 'setup'].includes(sectionParam ?? '') ? sectionParam : 'dashboard';
   const [templates, setTemplates] = useState<ChoreTemplate[]>([]);
   const [chores, setChores] = useState<Chore[]>([]);
   const [rewards, setRewards] = useState<Reward[]>([]);
@@ -75,8 +84,12 @@ export default function HomeScreen() {
 
   // Page / Tab navigation
   const [chorePage, setChorePage] = useState<'todo' | 'needs_approval' | 'approved'>('todo');
-  const [parentPanel, setParentPanel] = useState<'assign' | 'new_template' | 'prizes'>('assign');
-  const [kidSection, setKidSection] = useState<'chores' | 'store'>('chores');
+  const [parentPanel, setParentPanel] = useState<'new_template' | 'prizes' | 'invite' | 'members' | 'defaults'>('invite');
+  const [operationError, setOperationError] = useState('');
+  const [inviteRole, setInviteRole] = useState<'parent' | 'kid'>('kid');
+  const [inviteCode, setInviteCode] = useState('');
+  const [inviteError, setInviteError] = useState('');
+  const [inviteLoading, setInviteLoading] = useState(false);
 
   // Parent chore assignment states
   const [selectedTemplateId, setSelectedTemplateId] = useState<number | null>(null);
@@ -100,10 +113,22 @@ export default function HomeScreen() {
 
     const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
       setSession(session);
-      if (session) loadUserData(session.user.id);
+      if (session) {
+        loadUserData(session.user.id);
+      }
       else {
         setProfile(null);
         setChores([]);
+        setKids([]);
+        setMembers([]);
+        setTemplates([]);
+        setRewards([]);
+        setRedemptions([]);
+        setMemberToRemove(null);
+        setMemberError('');
+        setOperationError('');
+        setInviteCode('');
+        setInviteError('');
         setLoading(false);
       }
     });
@@ -127,16 +152,7 @@ export default function HomeScreen() {
     setProfile(userProfile);
 
     if (userProfile.role === 'parent') {
-      const { data: familyKids } = await supabase
-        .from('profiles')
-        .select('*')
-        .eq('family_code', userProfile.family_code)
-        .eq('role', 'kid');
-
-      if (familyKids && familyKids.length > 0) {
-        setKids(familyKids);
-        setSelectedKidId(familyKids[0].id);
-      }
+      await fetchMembers(userProfile.family_code);
 
       await fetchTemplates(userProfile.family_code);
     }
@@ -148,6 +164,32 @@ export default function HomeScreen() {
     ]);
 
     setLoading(false);
+  }
+
+  async function fetchMembers(familyCode: string) {
+    const { data, error } = await supabase.from('profiles').select('*').eq('family_code', familyCode).order('full_name');
+    if (error) { setMemberError('Could not load family members.'); return; }
+    const familyMembers = (data ?? []) as Profile[];
+    const familyKids = familyMembers.filter((person) => person.role === 'kid');
+    setMembers(familyMembers);
+    setKids(familyKids);
+    setSelectedKidId((previous) => familyKids.some((kid) => kid.id === previous) ? previous : (familyKids[0]?.id ?? ''));
+    setMemberError('');
+  }
+
+  async function handleRemoveMember(member: Profile) {
+    if (!profile) return;
+    setMemberBusy(true);
+    setMemberError('');
+    const { error } = await supabase.rpc('remove_family_member', { member_id: member.id });
+    if (error) {
+      setMemberError(error.code === 'PGRST202' || error.code === '42883' ? 'Member removal requires the family setup database update.' : error.message);
+    } else {
+      setMemberToRemove(null);
+      setInviteCode('');
+      await Promise.all([fetchMembers(profile.family_code), fetchChores(profile), fetchRedemptions(profile)]);
+    }
+    setMemberBusy(false);
   }
 
   async function fetchTemplates(familyCode: string) {
@@ -177,7 +219,8 @@ export default function HomeScreen() {
       query = query.eq('assigned_to_id', currentProfile.id);
     }
 
-    const { data } = await query;
+    const { data, error } = await query;
+    setChoreError(!!error);
     if (data) setChores(data);
   }
 
@@ -202,7 +245,8 @@ export default function HomeScreen() {
       query = query.eq('kid_id', currentProfile.id);
     }
 
-    const { data } = await query;
+    const { data, error } = await query;
+    setRedemptionError(!!error);
     if (data) setRedemptions(data);
   }
 
@@ -224,6 +268,23 @@ export default function HomeScreen() {
   const spentPoints = redemptions.reduce((sum, r) => sum + r.points_spent, 0);
   const availablePoints = Math.max(0, earnedPoints - spentPoints);
 
+  async function handleCreateInvitation() {
+    setInviteCode('');
+    setInviteError('');
+    setInviteLoading(true);
+    try {
+      const { data, error } = await supabase.rpc('create_family_invitation', { invited_role: inviteRole });
+      if (error) throw error;
+      if (typeof data !== 'string') throw new Error('Could not create an invitation.');
+      setInviteCode(data);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Could not create an invitation. Please try again.';
+      setInviteError(message);
+    } finally {
+      setInviteLoading(false);
+    }
+  }
+
   function handleSelectTemplate(template: ChoreTemplate) {
     setSelectedTemplateId(template.id);
     setPointsInput(template.default_points.toString());
@@ -231,9 +292,9 @@ export default function HomeScreen() {
 
   async function handleUpdateDefaultPoints() {
     if (!profile || !selectedTemplateId) return;
-    const parsedPoints = parseInt(pointsInput, 10);
-    if (isNaN(parsedPoints) || parsedPoints < 0) {
-      Alert.alert('Invalid points', 'Please enter a valid number.');
+    const parsedPoints = Number(pointsInput);
+    if (!pointsInput.trim() || !Number.isInteger(parsedPoints) || parsedPoints < 0) {
+      setOperationError('Enter a valid non-negative point value.');
       return;
     }
 
@@ -242,21 +303,21 @@ export default function HomeScreen() {
       .update({ default_points: parsedPoints })
       .eq('id', selectedTemplateId);
 
-    if (!error) {
-      setTemplates((prev) =>
-        prev.map((t) => (t.id === selectedTemplateId ? { ...t, default_points: parsedPoints } : t))
-      );
-      Alert.alert('Saved', `Default points updated to ${parsedPoints} pts!`);
-    }
+    if (error) { setOperationError(error.message); return; }
+    setOperationError('');
+    setTemplates((prev) =>
+      prev.map((t) => (t.id === selectedTemplateId ? { ...t, default_points: parsedPoints } : t))
+    );
   }
 
   async function handleCreateTemplate() {
     if (!profile || !newTemplateTitle.trim()) {
-      Alert.alert('Missing title', 'Enter a chore name to add to the list.');
+      setOperationError('Enter a chore name to add to the list.');
       return;
     }
 
-    const parsedPoints = parseInt(newTemplatePoints, 10) || 10;
+    const parsedPoints = Number(newTemplatePoints);
+    if (!newTemplatePoints.trim() || !Number.isInteger(parsedPoints) || parsedPoints < 0) { setOperationError('Enter a valid non-negative point value.'); return; }
 
     const { data, error } = await supabase
       .from('chore_templates')
@@ -274,8 +335,9 @@ export default function HomeScreen() {
       setPointsInput(data.default_points.toString());
       setNewTemplateTitle('');
       setNewTemplatePoints('15');
-      setParentPanel('assign');
-    }
+      setParentPanel('new_template');
+      setOperationError('');
+    } else if (error) setOperationError(error.message);
   }
 
   async function handleAssignChore() {
@@ -284,11 +346,12 @@ export default function HomeScreen() {
     const chosenKid = kids.find((k) => k.id === selectedKidId);
 
     if (!chosenTemplate || !chosenKid) {
-      Alert.alert('Missing selection', 'Select both a chore and a kid first.');
+      setOperationError('Select both a chore and a kid first.');
       return;
     }
 
-    const assignedPoints = parseInt(pointsInput, 10) || chosenTemplate.default_points;
+    const assignedPoints = Number(pointsInput);
+    if (!pointsInput.trim() || !Number.isInteger(assignedPoints) || assignedPoints < 0) { setOperationError('Enter a valid non-negative point value.'); return; }
 
     const { error } = await supabase.from('chores').insert({
       title: chosenTemplate.title,
@@ -303,7 +366,8 @@ export default function HomeScreen() {
     if (!error) {
       fetchChores(profile);
       setChorePage('todo');
-    }
+      setOperationError('');
+    } else setOperationError(error.message);
   }
 
   // Kid submits completed chore for parent approval
@@ -364,10 +428,11 @@ export default function HomeScreen() {
 
   async function handleCreateReward() {
     if (!profile || !newRewardTitle.trim()) {
-      Alert.alert('Missing prize name', 'Enter a prize title first.');
+      setOperationError('Enter a prize title first.');
       return;
     }
-    const cost = parseInt(newRewardCost, 10) || 25;
+    const cost = Number(newRewardCost);
+    if (!newRewardCost.trim() || !Number.isInteger(cost) || cost < 0) { setOperationError('Enter a valid non-negative prize cost.'); return; }
 
     const { error } = await supabase.from('rewards').insert({
       family_code: profile.family_code,
@@ -379,7 +444,8 @@ export default function HomeScreen() {
       setNewRewardTitle('');
       setNewRewardCost('25');
       fetchRewards(profile.family_code);
-    }
+      setOperationError('');
+    } else setOperationError(error.message);
   }
 
   async function handleFulfillRedemption(redemptionId: number) {
@@ -471,13 +537,13 @@ export default function HomeScreen() {
   if (loading) {
     return (
       <SafeAreaView style={styles.center}>
-        <ActivityIndicator size="large" color="#007AFF" />
+        <ActivityIndicator size="large" color="#2A9D8F" />
       </SafeAreaView>
     );
   }
 
   if (!session || !profile) {
-    return <AuthScreen />;
+    return <AuthScreen onSignedIn={() => router.replace('/')} />;
   }
 
   const pendingClaimsCount = redemptions.filter((r) => r.status === 'pending').length;
@@ -505,81 +571,132 @@ export default function HomeScreen() {
       ? needsApprovalChores
       : approvedChores;
 
-  return (
-    <SafeAreaView style={styles.container}>
-      {/* Top Bar */}
-      <View style={styles.topBar}>
-        <View>
-          <Text style={styles.header}>Hi, {profile.full_name}!</Text>
-          <Text style={styles.familyTag}>
-            Role: {profile.role.toUpperCase()} • Code: {profile.family_code}
-          </Text>
-        </View>
-        <TouchableOpacity style={styles.signOutBtn} onPress={() => supabase.auth.signOut()}>
-          <Text style={styles.signOutText}>Log Out</Text>
+  const dashboardHeader = (
+    <>
+      <View style={styles.brandRow}>
+        <View style={styles.brandMark}><Text style={styles.brandMarkText}>✓</Text></View>
+        <Text style={styles.brandName}>chore<Text style={styles.brandAccent}>tracker</Text></Text>
+        <TouchableOpacity style={styles.signOutBtn} onPress={async () => { await supabase.auth.signOut(); router.replace('/'); }}>
+          <Text style={styles.signOutText}>Sign out</Text>
         </TouchableOpacity>
       </View>
-
-      {/* ==================== KID POINTS & STORE BANNER ==================== */}
-      {profile.role === 'kid' && (
-        <View style={styles.pointsBanner}>
-          <View>
-            <Text style={styles.pointsBannerLabel}>APPROVED POINTS BALANCE</Text>
-            <Text style={styles.pointsBannerValue}>{availablePoints} pts</Text>
-          </View>
-          <View style={styles.kidTabRow}>
-            <TouchableOpacity
-              style={[styles.kidNavBtn, kidSection === 'chores' && styles.kidNavBtnActive]}
-              onPress={() => setKidSection('chores')}
-            >
-              <Text style={[styles.kidNavText, kidSection === 'chores' && styles.kidNavTextActive]}>
-                Chores
-              </Text>
+      <View style={styles.mainNav}>
+        {([
+          { key: 'dashboard', label: 'Overview', href: '/' },
+          { key: 'chores', label: 'Chores', href: '/?section=chores' },
+          { key: 'prizes', label: 'Prizes', href: '/?section=prizes' },
+          ...(profile.role === 'parent' ? [{ key: 'setup', label: 'Family setup', href: '/?section=setup' as const }] : []),
+        ] as const).map((item) => (
+          <Link key={item.key} href={item.href} asChild>
+            <TouchableOpacity accessibilityRole="link" style={StyleSheet.flatten([styles.mainNavItem, section === item.key && styles.mainNavItemActive])}>
+              <Text style={[styles.mainNavText, section === item.key && styles.mainNavTextActive]}>{item.label}</Text>
             </TouchableOpacity>
-            <TouchableOpacity
-              style={[styles.kidNavBtn, kidSection === 'store' && styles.kidNavBtnActive]}
-              onPress={() => setKidSection('store')}
-            >
-              <Text style={[styles.kidNavText, kidSection === 'store' && styles.kidNavTextActive]}>
-                Prize Store
-              </Text>
-            </TouchableOpacity>
-          </View>
+          </Link>
+        ))}
+      </View>
+      <View style={styles.topBar}>
+        <View style={styles.greeting}>
+          <Text style={styles.eyebrow}>{section === 'dashboard' ? 'YOUR FAMILY DASHBOARD' : 'CHORETRACKER / ' + section?.toUpperCase()}</Text>
+          <Text style={styles.header}>{section === 'dashboard' ? `Hey, ${profile.full_name}` : section === 'chores' ? 'Chore board' : section === 'prizes' ? 'Prizes' : 'Family setup'}</Text>
+          <Text style={styles.headerSub}>{section === 'dashboard' ? 'Here’s what’s happening at home.' : section === 'chores' ? 'Keep the household moving, one chore at a time.' : section === 'prizes' ? 'See what everyone is working toward.' : 'Manage the people and defaults behind your family.'}</Text>
         </View>
+        <View style={styles.familyPill}><Text style={styles.familyTag}>{profile.role === 'parent' ? 'PARENT' : 'KID'}</Text></View>
+      </View>
+
+      {section === 'dashboard' && (
+        <>
+          {(choreError || redemptionError) && <Text style={styles.inviteError}>Some dashboard information could not be loaded. Check your connection and try again.</Text>}
+          <View style={styles.overviewHero}>
+            <View style={styles.overviewHeroBody}>
+              <Text style={styles.heroEyebrow}>{profile.role === 'parent' ? 'YOUR HOUSEHOLD AT A GLANCE' : 'YOUR CHORES AT A GLANCE'}</Text>
+              <Text style={styles.heroNumber}>{choreError ? '—' : todoChores.length}</Text>
+              <Text style={styles.heroTitle}>{profile.role === 'parent' ? 'chores left to do' : 'chores on your list'}</Text>
+              <Text style={styles.heroCaption}>{profile.role === 'parent' ? 'A little teamwork goes a long way.' : 'Ready when you are.'}</Text>
+              <Link href="/?section=chores" asChild><TouchableOpacity style={styles.heroButton}><Text style={styles.heroButtonText}>View chore board  →</Text></TouchableOpacity></Link>
+            </View>
+            <View style={styles.heroIllustration}><Text style={styles.heroIllustrationText}>✓</Text></View>
+          </View>
+          <Text style={styles.overviewHeading}>The important stuff</Text>
+          <View style={styles.overviewStats}>
+            <View style={styles.overviewStat}><Text style={styles.overviewStatLabel}>NEEDS APPROVAL</Text><Text style={styles.overviewStatValue}>{choreError ? '—' : needsApprovalChores.length}</Text><Text style={styles.overviewStatCaption}>Chores waiting for review</Text></View>
+            <View style={styles.overviewStat}><Text style={styles.overviewStatLabel}>APPROVED CHORES</Text><Text style={styles.overviewStatValue}>{choreError ? '—' : approvedChores.length}</Text><Text style={styles.overviewStatCaption}>A job well done</Text></View>
+            <View style={styles.overviewStat}><Text style={styles.overviewStatLabel}>{profile.role === 'parent' ? 'PRIZES TO GIVE' : 'YOUR POINTS'}</Text><Text style={styles.overviewStatValue}>{redemptionError || (profile.role === 'kid' && choreError) ? '—' : profile.role === 'parent' ? pendingClaimsCount : availablePoints}</Text><Text style={styles.overviewStatCaption}>{profile.role === 'parent' ? 'Claimed prizes waiting' : 'Available to spend'}</Text></View>
+          </View>
+          <Text style={styles.overviewHeading}>Where to next?</Text>
+          <View style={styles.quickLinks}>
+            <Link href="/?section=chores" asChild><TouchableOpacity style={styles.quickLink}><Text style={styles.quickLinkIcon}>✓</Text><Text style={styles.quickLinkTitle}>Chores  →</Text><Text style={styles.quickLinkDescription}>{profile.role === 'parent' ? 'Assign and review chores' : 'See your chore list'}</Text></TouchableOpacity></Link>
+            <Link href="/?section=prizes" asChild><TouchableOpacity style={styles.quickLink}><Text style={styles.quickLinkIcon}>✦</Text><Text style={styles.quickLinkTitle}>Prizes  →</Text><Text style={styles.quickLinkDescription}>{profile.role === 'parent' ? 'Manage prize claims' : 'Spend your points'}</Text></TouchableOpacity></Link>
+            <Link href="/family-stats" asChild><TouchableOpacity style={styles.quickLink}><Text style={styles.quickLinkIcon}>↗</Text><Text style={styles.quickLinkTitle}>{profile.role === 'parent' ? 'Child stats' : 'Leaderboard'}  →</Text><Text style={styles.quickLinkDescription}>See everyone’s progress</Text></TouchableOpacity></Link>
+            {profile.role === 'parent' && <Link href="/?section=setup" asChild><TouchableOpacity style={styles.quickLink}><Text style={styles.quickLinkIcon}>⚙</Text><Text style={styles.quickLinkTitle}>Family setup  →</Text><Text style={styles.quickLinkDescription}>People, chores &amp; prizes</Text></TouchableOpacity></Link>}
+          </View>
+        </>
       )}
 
-      {/* ==================== PARENT DASHBOARD ==================== */}
-      {profile.role === 'parent' && (
+      {profile.role === 'parent' && section !== 'dashboard' && (
         <View style={styles.assignBox}>
-          <View style={styles.tabRow}>
-            <TouchableOpacity
-              style={[styles.tabBtn, parentPanel === 'assign' && styles.tabBtnActive]}
-              onPress={() => setParentPanel('assign')}
-            >
-              <Text style={[styles.tabText, parentPanel === 'assign' && styles.tabTextActive]}>
-                Assign Chore
-              </Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[styles.tabBtn, parentPanel === 'new_template' && styles.tabBtnActive]}
-              onPress={() => setParentPanel('new_template')}
-            >
-              <Text style={[styles.tabText, parentPanel === 'new_template' && styles.tabTextActive]}>
-                + Add Chore
-              </Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[styles.tabBtn, parentPanel === 'prizes' && styles.tabBtnActive]}
-              onPress={() => setParentPanel('prizes')}
-            >
-              <Text style={[styles.tabText, parentPanel === 'prizes' && styles.tabTextActive]}>
-                Prizes {pendingClaimsCount > 0 ? `(${pendingClaimsCount})` : ''}
-              </Text>
-            </TouchableOpacity>
-          </View>
+          <View style={styles.sectionHeading}><View><Text style={styles.sectionKicker}>{section === 'setup' ? 'FAMILY SETTINGS' : section === 'chores' ? 'ASSIGN A CHORE' : 'PRIZE CLAIMS'}</Text><Text style={styles.sectionTitle}>{section === 'setup' ? 'Make it yours' : section === 'chores' ? 'Give someone a task' : 'Claimed prizes'}</Text></View></View>
+          {section === 'setup' && <View style={styles.tabRow}>
+            {([
+              ['invite', 'Invite'], ['members', 'Members'], ['new_template', 'Chores'], ['defaults', 'Default points'], ['prizes', 'Prizes'],
+            ] as const).map(([key, label]) => <TouchableOpacity key={key} style={[styles.tabBtn, parentPanel === key && styles.tabBtnActive]} onPress={() => { setParentPanel(key); setOperationError(''); }}><Text style={[styles.tabText, parentPanel === key && styles.tabTextActive]}>{label}</Text></TouchableOpacity>)}
+          </View>}
+          {!!operationError && <Text style={styles.inviteError}>{operationError}</Text>}
 
-          {parentPanel === 'assign' && (
+          {section === 'setup' && parentPanel === 'invite' && (
+            <View>
+              <Text style={styles.label}>Invite a family member as:</Text>
+              <View style={styles.kidPicker}>
+                {(['kid', 'parent'] as const).map((role) => (
+                  <TouchableOpacity
+                    key={role}
+                    style={[styles.kidChip, inviteRole === role && styles.kidChipActive]}
+                    onPress={() => { setInviteRole(role); setInviteCode(''); setInviteError(''); }}
+                  >
+                    <Text style={[styles.kidChipText, inviteRole === role && styles.kidChipTextActive]}>{role === 'kid' ? 'Kid' : 'Parent'}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+              <Text style={styles.inviteHelp}>The code is single-use, expires after 7 days, and grants the selected role to whoever has it. Share it privately.</Text>
+              <TouchableOpacity style={styles.addBtn} onPress={handleCreateInvitation} disabled={inviteLoading}>
+                {inviteLoading ? <ActivityIndicator color="#0C2127" /> : <Text style={styles.addBtnText}>Create {inviteRole === 'kid' ? 'kid' : 'parent'} invitation</Text>}
+              </TouchableOpacity>
+              {!!inviteError && <Text style={styles.inviteError}>{inviteError}</Text>}
+              {!!inviteCode && (
+                <View>
+                  <Text style={styles.label}>Share this invitation code:</Text>
+                  <Text selectable style={styles.inviteCode}>{inviteCode}</Text>
+                  <Text style={styles.inviteHelp}>They can enter it under “I have an invitation” on the sign-in screen.</Text>
+                </View>
+              )}
+            </View>
+          )}
+
+          {section === 'setup' && parentPanel === 'members' && (
+            <View>
+              <Text style={styles.inviteHelp}>Removing someone separates their account from this family. Their old chores and prize history remain here. They can no longer access this family; rejoining with that account requires administrator help.</Text>
+              {!!memberError && <Text style={styles.inviteError}>{memberError}</Text>}
+              {members.map((member) => <View key={member.id} style={styles.claimRow}>
+                <View style={{ flex: 1 }}><Text style={styles.claimTitle}>{member.full_name}{member.id === profile.id ? ' (you)' : ''}</Text><Text style={styles.claimSub}>{member.role === 'parent' ? 'Parent' : 'Kid'}</Text></View>
+                {member.id !== profile.id && <TouchableOpacity style={styles.removeBtn} onPress={() => { setMemberToRemove(member); setMemberError(''); }}><Text style={styles.removeBtnText}>Remove</Text></TouchableOpacity>}
+              </View>)}
+              {memberToRemove && <View style={styles.confirmBox}>
+                <Text style={styles.claimTitle}>Remove {memberToRemove.full_name} from your family?</Text>
+                <Text style={styles.inviteHelp}>All unused family invitations will be revoked. This does not delete their account.</Text>
+                <View style={styles.pointsRow}><TouchableOpacity disabled={memberBusy} style={styles.removeBtn} onPress={() => handleRemoveMember(memberToRemove)}><Text style={styles.removeBtnText}>{memberBusy ? 'Removing…' : 'Yes, remove'}</Text></TouchableOpacity><TouchableOpacity disabled={memberBusy} style={styles.saveDefaultBtn} onPress={() => setMemberToRemove(null)}><Text style={styles.saveDefaultText}>Cancel</Text></TouchableOpacity></View>
+              </View>}
+            </View>
+          )}
+
+          {section === 'setup' && parentPanel === 'defaults' && <View>
+            <Text style={styles.inviteHelp}>Choose a chore and set the points used when assigning it.</Text>
+            <View style={styles.templateWrap}>{templates.map((tpl) => <TouchableOpacity key={tpl.id} style={[styles.templateChip, tpl.id === selectedTemplateId && styles.templateChipActive]} onPress={() => handleSelectTemplate(tpl)}><Text style={[styles.templateChipText, tpl.id === selectedTemplateId && styles.templateChipTextActive]}>{tpl.title} ({tpl.default_points} pts)</Text></TouchableOpacity>)}</View>
+            {templates.length === 0 && <Text style={styles.inviteHelp}>Add a chore first.</Text>}
+            <Text style={styles.label}>Default points</Text><View style={styles.pointsRow}><TextInput style={[styles.input, { width: 85, marginBottom: 0 }]} keyboardType="numeric" value={pointsInput} onChangeText={setPointsInput} /><TouchableOpacity style={styles.saveDefaultBtn} disabled={!selectedTemplateId} onPress={handleUpdateDefaultPoints}><Text style={styles.saveDefaultText}>Save default</Text></TouchableOpacity></View>
+          </View>}
+
+          {section === 'chores' && (
             <>
+              {(templates.length === 0 || kids.length === 0) && <Text style={styles.inviteHelp}>Add chores and invite kids in Family setup before assigning a chore.</Text>}
               <Text style={styles.label}>1. Select a Chore:</Text>
               <View style={styles.templateWrap}>
                 {templates.map((tpl) => {
@@ -611,13 +728,7 @@ export default function HomeScreen() {
                   value={pointsInput}
                   onChangeText={setPointsInput}
                 />
-                <TouchableOpacity
-                  style={styles.saveDefaultBtn}
-                  onPress={handleUpdateDefaultPoints}
-                  disabled={!selectedTemplateId}
-                >
-                  <Text style={styles.saveDefaultText}>Set as New Default</Text>
-                </TouchableOpacity>
+
               </View>
 
               <Text style={styles.label}>3. Assign To:</Text>
@@ -646,7 +757,7 @@ export default function HomeScreen() {
             </>
           )}
 
-          {parentPanel === 'new_template' && (
+          {section === 'setup' && parentPanel === 'new_template' && (
             <>
               <Text style={styles.label}>New Chore Name:</Text>
               <TextInput
@@ -666,11 +777,13 @@ export default function HomeScreen() {
               <TouchableOpacity style={styles.addBtn} onPress={handleCreateTemplate}>
                 <Text style={styles.addBtnText}>Save to Chore List</Text>
               </TouchableOpacity>
+              <Text style={styles.label}>Your chores</Text>
+              <View style={styles.templateWrap}>{templates.map((tpl) => <View key={tpl.id} style={styles.rewardTag}><Text style={styles.rewardTagText}>{tpl.title} · {tpl.default_points} pts</Text></View>)}</View>
             </>
           )}
 
-          {parentPanel === 'prizes' && (
-            <ScrollView style={{ maxHeight: 240 }}>
+          {section === 'setup' && parentPanel === 'prizes' && (
+            <View>
               <Text style={styles.label}>Add a New Prize for Kids:</Text>
               <View style={styles.pointsRow}>
                 <TextInput
@@ -702,6 +815,11 @@ export default function HomeScreen() {
                 ))}
               </View>
 
+            </View>
+          )}
+          {section === 'prizes' && (
+            <View>
+              {redemptions.length === 0 && <Text style={styles.inviteHelp}>No prizes have been claimed yet.</Text>}
               {redemptions.length > 0 && (
                 <>
                   <Text style={styles.label}>Claimed Prizes:</Text>
@@ -709,7 +827,7 @@ export default function HomeScreen() {
                     <View key={claim.id} style={styles.claimRow}>
                       <View style={{ flex: 1 }}>
                         <Text style={styles.claimTitle}>
-                          {claim.kid_name} claimed "{claim.reward_title}"
+                          {claim.kid_name} claimed &quot;{claim.reward_title}&quot;
                         </Text>
                         <Text style={styles.claimSub}>
                           -{claim.points_spent} pts •{' '}
@@ -728,14 +846,22 @@ export default function HomeScreen() {
                   ))}
                 </>
               )}
-            </ScrollView>
+            </View>
           )}
         </View>
       )}
+    </>
+  );
 
-      {/* ==================== KID PRIZE STORE VIEW ==================== */}
-      {profile.role === 'kid' && kidSection === 'store' ? (
+  return (
+    <SafeAreaView style={styles.container} edges={['top', 'left', 'right', 'bottom']}>
+      {section === 'dashboard' || section === 'setup' || (section === 'prizes' && profile.role === 'parent') ? (
+        <ScrollView contentContainerStyle={styles.listContent} keyboardShouldPersistTaps="handled">{dashboardHeader}{section === 'setup' && profile.role !== 'parent' && <Text style={styles.inviteHelp}>Family setup is available to parents.</Text>}</ScrollView>
+      ) : profile.role === 'kid' && section === 'prizes' ? (
         <FlatList
+          contentContainerStyle={styles.listContent}
+          keyboardShouldPersistTaps="handled"
+          ListHeaderComponent={<>{dashboardHeader}<Text style={styles.listHeading}>The prize shelf</Text><Text style={styles.listDescription}>A little something to work towards.</Text></>}
           data={rewards}
           keyExtractor={(item) => item.id.toString()}
           ListEmptyComponent={<Text style={styles.emptyText}>No prizes added by parents yet!</Text>}
@@ -763,7 +889,18 @@ export default function HomeScreen() {
         />
       ) : (
         /* ==================== 3-PAGE CHORE VIEW ==================== */
-        <>
+        <FlatList
+          contentContainerStyle={styles.listContent}
+          keyboardShouldPersistTaps="handled"
+          ListHeaderComponent={
+            <>
+              {dashboardHeader}
+              <View style={styles.listHeadingRow}>
+                <View>
+                  <Text style={styles.listHeading}>The chore board</Text>
+                  <Text style={styles.listDescription}>Everything your family is working on.</Text>
+                </View>
+              </View>
           <View style={styles.pageBar}>
             <TouchableOpacity
               style={[styles.pageTab, chorePage === 'todo' && styles.pageTabActive]}
@@ -802,8 +939,8 @@ export default function HomeScreen() {
               </Text>
             </TouchableOpacity>
           </View>
-
-          <FlatList
+            </>
+          }
             data={displayedChores}
             keyExtractor={(item) => item.id.toString()}
             ListEmptyComponent={
@@ -909,7 +1046,7 @@ export default function HomeScreen() {
                       style={styles.pendingReviewBtn}
                       onPress={() => handleUndoSubmit(item)}
                     >
-                      <Text style={styles.completeBtnText}>
+                      <Text style={styles.pendingReviewText}>
                         ⏳ Waiting for Parent Approval (Tap to Undo)
                       </Text>
                     </TouchableOpacity>
@@ -927,167 +1064,142 @@ export default function HomeScreen() {
               );
             }}
           />
-        </>
       )}
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  center: { flex: 1, justifyContent: 'center', alignItems: 'center' },
-  container: { flex: 1, backgroundColor: '#F5F7FA', paddingHorizontal: 20, paddingTop: 50 },
-  topBar: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 },
-  header: { fontSize: 24, fontWeight: 'bold', color: '#1A1A1A' },
-  familyTag: { fontSize: 12, color: '#666', marginTop: 2 },
-  signOutBtn: { backgroundColor: '#FFEAEA', paddingHorizontal: 12, paddingVertical: 8, borderRadius: 8 },
-  signOutText: { color: '#D93025', fontWeight: '600', fontSize: 13 },
-
-  // Kid Points Banner
-  pointsBanner: {
-    backgroundColor: '#137333',
-    padding: 16,
-    borderRadius: 12,
-    marginBottom: 12,
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  pointsBannerLabel: { color: '#CEEAD6', fontSize: 11, fontWeight: '700', letterSpacing: 0.5 },
-  pointsBannerValue: { color: '#FFF', fontSize: 28, fontWeight: 'bold', marginTop: 2 },
-  kidTabRow: { flexDirection: 'row', gap: 6 },
-  kidNavBtn: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 8, backgroundColor: 'rgba(255,255,255,0.2)' },
-  kidNavBtnActive: { backgroundColor: '#FFF' },
-  kidNavText: { color: '#FFF', fontWeight: '700', fontSize: 13 },
-  kidNavTextActive: { color: '#137333' },
-
-  // Parent Dashboard
-  assignBox: { backgroundColor: '#FFF', padding: 14, borderRadius: 12, marginBottom: 12, elevation: 2 },
-  tabRow: { flexDirection: 'row', gap: 6, marginBottom: 10 },
-  tabBtn: { flex: 1, paddingVertical: 8, borderRadius: 8, backgroundColor: '#F0F4F8', alignItems: 'center' },
-  tabBtnActive: { backgroundColor: '#007AFF' },
-  tabText: { fontSize: 12, fontWeight: '700', color: '#4A5568' },
-  tabTextActive: { color: '#FFF' },
-  label: { fontSize: 12, fontWeight: '700', color: '#4A5568', marginBottom: 6, marginTop: 4 },
+  center: { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#14232A' },
+  container: { flex: 1, backgroundColor: '#14232A' },
+  listContent: { width: '100%', maxWidth: 960, alignSelf: 'center', paddingHorizontal: 20, paddingBottom: 56, flexGrow: 1 },
+  mainNav: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, paddingTop: 16 },
+  mainNavItem: { paddingVertical: 10, paddingHorizontal: 14, borderRadius: 10 },
+  mainNavItemActive: { backgroundColor: '#1B3A3A' },
+  mainNavText: { color: '#A9C0C6', fontSize: 13, fontWeight: '700' },
+  mainNavTextActive: { color: '#EAF2F2' },
+  overviewHero: { backgroundColor: '#0F1E25', borderRadius: 22, padding: 26, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', overflow: 'hidden', gap: 12 },
+  overviewHeroBody: { flex: 1 },
+  heroEyebrow: { color: '#A8D5CE', fontSize: 10, fontWeight: '800', letterSpacing: 1.1 },
+  heroNumber: { color: '#FFFFFF', fontSize: 54, fontWeight: '800', marginTop: 15 },
+  heroTitle: { color: '#FFFFFF', fontSize: 20, fontWeight: '800' },
+  heroCaption: { color: '#BFD8D4', fontSize: 13, marginTop: 6 },
+  heroButton: { backgroundColor: '#F5FAF9', borderRadius: 10, paddingVertical: 11, paddingHorizontal: 15, alignSelf: 'flex-start', marginTop: 20 },
+  heroButtonText: { color: '#14232A', fontSize: 12, fontWeight: '800' },
+  heroIllustration: { width: 100, height: 100, borderRadius: 50, backgroundColor: '#2A9D8F', alignItems: 'center', justifyContent: 'center' },
+  heroIllustrationText: { color: '#E9C46A', fontSize: 54, fontWeight: '800' },
+  overviewHeading: { color: '#EAF2F2', fontSize: 19, fontWeight: '800', marginTop: 30, marginBottom: 14 },
+  overviewStats: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
+  overviewStat: { flexGrow: 1, flexBasis: 150, backgroundColor: '#1E3139', borderRadius: 16, borderWidth: 1, borderColor: '#2E4750', padding: 17 },
+  overviewStatLabel: { color: '#7E979E', fontSize: 10, fontWeight: '800', letterSpacing: 0.6 },
+  overviewStatValue: { color: '#EAF2F2', fontSize: 30, fontWeight: '800', marginTop: 9 },
+  overviewStatCaption: { color: '#A9C0C6', fontSize: 12, marginTop: 4 },
+  quickLinks: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
+  quickLink: { flexGrow: 1, flexBasis: 180, backgroundColor: '#1E3139', borderRadius: 16, borderWidth: 1, borderColor: '#2E4750', padding: 17 },
+  quickLinkIcon: { color: '#5FC7BA', fontSize: 22, fontWeight: '800', marginBottom: 12 },
+  quickLinkTitle: { color: '#EAF2F2', fontSize: 15, fontWeight: '800' },
+  quickLinkDescription: { color: '#A9C0C6', fontSize: 12, marginTop: 5 },
+  removeBtn: { backgroundColor: '#3B2724', paddingHorizontal: 12, paddingVertical: 10, borderRadius: 9 },
+  removeBtnText: { color: '#F08A72', fontSize: 12, fontWeight: '700' },
+  confirmBox: { backgroundColor: '#3A3324', padding: 14, borderRadius: 12, marginTop: 12 },
+  brandRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 22, borderBottomWidth: 1, borderBottomColor: '#2E4750' },
+  brandMark: { width: 34, height: 34, borderRadius: 12, backgroundColor: '#0F1E25', justifyContent: 'center', alignItems: 'center', marginRight: 9 },
+  brandMarkText: { color: '#FFFFFF', fontSize: 19, fontWeight: '800' },
+  brandName: { flex: 1, color: '#EAF2F2', fontSize: 21, fontWeight: '800', letterSpacing: -1 },
+  brandAccent: { color: '#E76F51' },
+  signOutBtn: { borderWidth: 1, borderColor: '#2E4750', borderRadius: 12, paddingHorizontal: 15, paddingVertical: 10, backgroundColor: '#1E3139' },
+  signOutText: { color: '#EAF2F2', fontWeight: '700', fontSize: 12 },
+  topBar: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: 16, paddingVertical: 30 },
+  greeting: { flexGrow: 1, flexShrink: 1 },
+  eyebrow: { color: '#7E979E', fontSize: 10, fontWeight: '800', letterSpacing: 1.5, marginBottom: 8 },
+  header: { fontSize: 32, lineHeight: 40, fontWeight: '800', letterSpacing: -1, color: '#EAF2F2' },
+  wave: { color: '#F4A261' },
+  headerSub: { fontSize: 14, color: '#A9C0C6', marginTop: 5 },
+  familyPill: { backgroundColor: '#20343C', borderRadius: 30, paddingHorizontal: 14, paddingVertical: 9 },
+  familyTag: { fontSize: 10, fontWeight: '800', letterSpacing: 0.7, color: '#A9C0C6' },
+  pointsBanner: { backgroundColor: '#2A9D8F', padding: 22, borderRadius: 20, marginBottom: 26, flexDirection: 'row', flexWrap: 'wrap', gap: 18, justifyContent: 'space-between', alignItems: 'center' },
+  pointsBannerLabel: { color: '#BFD8D4', fontSize: 10, fontWeight: '800', letterSpacing: 1 },
+  pointsBannerValue: { color: '#FFFFFF', fontSize: 30, fontWeight: '800', marginTop: 5 },
+  kidTabRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
+  kidNavBtn: { paddingHorizontal: 14, paddingVertical: 10, borderRadius: 10, backgroundColor: 'rgba(255,255,255,0.12)' },
+  kidNavBtnActive: { backgroundColor: '#E9F5F3' },
+  kidNavText: { color: '#FFFFFF', fontWeight: '700', fontSize: 12 },
+  kidNavTextActive: { color: '#5FC7BA' },
+  assignBox: { backgroundColor: '#1E3139', padding: 22, borderRadius: 20, marginBottom: 30, borderWidth: 1, borderColor: '#2E4750' },
+  sectionHeading: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 18 },
+  sectionKicker: { fontSize: 10, letterSpacing: 1.1, fontWeight: '800', color: '#7E979E', marginBottom: 5 },
+  sectionTitle: { fontSize: 20, fontWeight: '800', color: '#EAF2F2', letterSpacing: -0.5 },
+  statsLink: { backgroundColor: '#1B3A3A', paddingHorizontal: 12, paddingVertical: 10, borderRadius: 10 },
+  statsLinkText: { color: '#5FC7BA', fontSize: 12, fontWeight: '700' },
+  tabRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 17, backgroundColor: '#20343C', borderRadius: 12, padding: 4 },
+  tabBtn: { flexGrow: 1, paddingHorizontal: 10, paddingVertical: 11, borderRadius: 9, alignItems: 'center' },
+  tabBtnActive: { backgroundColor: '#2A9D8F' },
+  tabText: { fontSize: 12, fontWeight: '700', color: '#A9C0C6', textAlign: 'center' },
+  tabTextActive: { color: '#0C2127' },
+  label: { fontSize: 12, fontWeight: '700', color: '#A9C0C6', marginBottom: 8, marginTop: 10 },
   templateWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 8 },
-  templateChip: {
-    paddingHorizontal: 12,
-    paddingVertical: 7,
-    borderRadius: 18,
-    borderWidth: 1,
-    borderColor: '#CBD5E1',
-    backgroundColor: '#F8FAFC',
-  },
-  templateChipActive: { backgroundColor: '#EBF5FF', borderColor: '#007AFF' },
-  templateChipText: { fontSize: 12, color: '#334155', fontWeight: '600' },
-  templateChipTextActive: { color: '#007AFF' },
-  pointsRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 8 },
-  saveDefaultBtn: {
-    backgroundColor: '#F0F4F8',
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#CBD5E1',
-  },
-  saveDefaultText: { fontSize: 12, fontWeight: '600', color: '#334155' },
-  input: {
-    backgroundColor: '#F8FAFC',
-    borderWidth: 1,
-    borderColor: '#D0D7DE',
-    borderRadius: 8,
-    padding: 10,
-    marginBottom: 8,
-  },
-  kidPicker: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 10 },
-  kidChip: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 16, borderWidth: 1, borderColor: '#007AFF' },
-  kidChipActive: { backgroundColor: '#007AFF' },
-  kidChipText: { color: '#007AFF', fontSize: 12, fontWeight: '600' },
-  kidChipTextActive: { color: '#FFF' },
-  addBtn: { backgroundColor: '#007AFF', padding: 11, borderRadius: 8, alignItems: 'center' },
-  smallAddBtn: { backgroundColor: '#007AFF', paddingHorizontal: 14, paddingVertical: 10, borderRadius: 8 },
-  addBtnText: { color: '#FFF', fontWeight: 'bold' },
-
-  // 3-Page Chore Navigation Bar
-  pageBar: {
-    flexDirection: 'row',
-    backgroundColor: '#E2E8F0',
-    padding: 4,
-    borderRadius: 10,
-    marginBottom: 12,
-    gap: 4,
-  },
-  pageTab: {
-    flex: 1,
-    paddingVertical: 9,
-    borderRadius: 8,
-    alignItems: 'center',
-  },
-  pageTabActive: { backgroundColor: '#007AFF' },
-  pageTabApprovalActive: { backgroundColor: '#E67E22' },
-  pageTabApprovedActive: { backgroundColor: '#137333' },
-  pageTabText: { fontSize: 12, fontWeight: '700', color: '#475569' },
-  pageTabTextActive: { color: '#FFF' },
-
-  // Prizes & Claims
-  rewardTag: { backgroundColor: '#FEF7E0', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 12, borderWidth: 1, borderColor: '#F9AB00' },
-  rewardTagText: { fontSize: 12, fontWeight: '600', color: '#B06000' },
-  claimRow: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#F8FAFC', padding: 10, borderRadius: 8, marginBottom: 6, borderWidth: 1, borderColor: '#E2E8F0' },
-  claimTitle: { fontSize: 13, fontWeight: '700', color: '#1A1A1A' },
-  claimSub: { fontSize: 11, color: '#666', marginTop: 2 },
-  fulfillBtn: { backgroundColor: '#137333', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 6 },
-  fulfillBtnText: { color: '#FFF', fontSize: 12, fontWeight: '700' },
-  redeemBtn: { backgroundColor: '#007AFF', paddingHorizontal: 14, paddingVertical: 9, borderRadius: 8 },
-  redeemBtnDisabled: { backgroundColor: '#94A3B8' },
-  redeemBtnText: { color: '#FFF', fontWeight: 'bold', fontSize: 13 },
-
-  // Chore Cards
-  card: { backgroundColor: '#FFF', padding: 16, borderRadius: 12, marginBottom: 12, elevation: 2 },
-  submittedCard: { borderWidth: 2, borderColor: '#F9AB00' },
-  cardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 },
-  title: { fontSize: 17, fontWeight: '600', color: '#222' },
-  completedText: { textDecorationLine: 'line-through', color: '#888' },
-  subtitle: { fontSize: 13, color: '#666', marginTop: 3 },
-  badge: { backgroundColor: '#E6F4EA', paddingHorizontal: 10, paddingVertical: 5, borderRadius: 16 },
-  points: { color: '#137333', fontWeight: 'bold', fontSize: 13 },
+  templateChip: { paddingHorizontal: 14, paddingVertical: 10, borderRadius: 11, borderWidth: 1, borderColor: '#2E4750', backgroundColor: '#172A31' },
+  templateChipActive: { backgroundColor: '#1B3A3A', borderColor: '#2A9D8F' },
+  templateChipText: { fontSize: 12, color: '#A9C0C6', fontWeight: '600' },
+  templateChipTextActive: { color: '#EAF2F2' },
+  pointsRow: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 8, marginBottom: 8 },
+  saveDefaultBtn: { backgroundColor: '#20343C', paddingHorizontal: 14, paddingVertical: 12, borderRadius: 10 },
+  saveDefaultText: { fontSize: 12, fontWeight: '700', color: '#EAF2F2' },
+  input: { backgroundColor: '#172A31', borderWidth: 1, borderColor: '#2E4750', borderRadius: 10, paddingHorizontal: 13, paddingVertical: 11, marginBottom: 8, color: '#EAF2F2', minHeight: 44 },
+  kidPicker: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 15 },
+  kidChip: { paddingHorizontal: 14, paddingVertical: 9, borderRadius: 10, borderWidth: 1, borderColor: '#2E4750' },
+  kidChipActive: { backgroundColor: '#2A9D8F', borderColor: '#2A9D8F' },
+  kidChipText: { color: '#A9C0C6', fontSize: 12, fontWeight: '700' },
+  kidChipTextActive: { color: '#0C2127' },
+  addBtn: { backgroundColor: '#2A9D8F', padding: 14, borderRadius: 11, alignItems: 'center' },
+  smallAddBtn: { backgroundColor: '#2A9D8F', paddingHorizontal: 16, paddingVertical: 13, borderRadius: 10 },
+  addBtnText: { color: '#0C2127', fontWeight: '700', fontSize: 13 },
+  inviteHelp: { color: '#A9C0C6', fontSize: 12, lineHeight: 19, marginBottom: 12 },
+  inviteError: { color: '#F08A72', fontSize: 13, lineHeight: 20, marginTop: 10 },
+  inviteCode: { color: '#5FC7BA', backgroundColor: '#22343A', padding: 12, borderRadius: 10, fontSize: 13 },
+  listHeadingRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  listHeading: { fontSize: 22, fontWeight: '800', letterSpacing: -0.5, color: '#EAF2F2' },
+  listDescription: { color: '#A9C0C6', fontSize: 13, marginTop: 5, marginBottom: 17 },
+  pageBar: { flexDirection: 'row', flexWrap: 'wrap', backgroundColor: '#20343C', padding: 4, borderRadius: 12, marginBottom: 16, gap: 4 },
+  pageTab: { flexGrow: 1, paddingHorizontal: 8, paddingVertical: 11, borderRadius: 9, alignItems: 'center' },
+  pageTabActive: { backgroundColor: '#2A9D8F' },
+  pageTabApprovalActive: { backgroundColor: '#2A9D8F' },
+  pageTabApprovedActive: { backgroundColor: '#2A9D8F' },
+  pageTabText: { fontSize: 12, fontWeight: '700', color: '#A9C0C6', textAlign: 'center' },
+  pageTabTextActive: { color: '#0C2127' },
+  rewardTag: { backgroundColor: '#3A3324', paddingHorizontal: 12, paddingVertical: 9, borderRadius: 10 },
+  rewardTagText: { fontSize: 12, fontWeight: '700', color: '#E9C46A' },
+  claimRow: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#172A31', padding: 12, borderRadius: 10, marginBottom: 6 },
+  claimTitle: { fontSize: 13, fontWeight: '700', color: '#EAF2F2' },
+  claimSub: { fontSize: 11, color: '#7E979E', marginTop: 4 },
+  fulfillBtn: { backgroundColor: '#2A9D8F', paddingHorizontal: 10, paddingVertical: 9, borderRadius: 8 },
+  fulfillBtnText: { color: '#0C2127', fontSize: 12, fontWeight: '700' },
+  redeemBtn: { backgroundColor: '#2A9D8F', paddingHorizontal: 14, paddingVertical: 11, borderRadius: 10, marginLeft: 8 },
+  redeemBtnDisabled: { backgroundColor: '#3A4F57' },
+  redeemBtnText: { color: '#0C2127', fontWeight: '700', fontSize: 12 },
+  card: { backgroundColor: '#1E3139', padding: 18, borderRadius: 17, marginBottom: 12, borderWidth: 1, borderColor: '#2E4750' },
+  submittedCard: { borderColor: '#E9C46A' },
+  cardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginBottom: 14 },
+  title: { fontSize: 16, fontWeight: '800', color: '#EAF2F2' },
+  completedText: { color: '#A9C0C6' },
+  subtitle: { fontSize: 12, color: '#7E979E', marginTop: 5 },
+  badge: { backgroundColor: '#1B3A3A', paddingHorizontal: 11, paddingVertical: 7, borderRadius: 10 },
+  points: { color: '#5FC7BA', fontWeight: '800', fontSize: 12 },
   photoRow: { flexDirection: 'row', gap: 10 },
-  photoBox: {
-    flex: 1,
-    height: 95,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#D0D7DE',
-    borderStyle: 'dashed',
-    backgroundColor: '#F8FAFC',
-    justifyContent: 'center',
-    alignItems: 'center',
-    overflow: 'hidden',
-  },
+  photoBox: { flex: 1, height: 95, borderRadius: 11, borderWidth: 1, borderColor: '#2E4750', borderStyle: 'dashed', backgroundColor: '#172A31', justifyContent: 'center', alignItems: 'center', overflow: 'hidden' },
   thumbnail: { width: '100%', height: '100%', resizeMode: 'cover' },
-  photoPlaceholder: { fontSize: 12, fontWeight: '600', color: '#007AFF' },
-  uploadingText: { fontSize: 12, color: '#007AFF', marginTop: 6, textAlign: 'center' },
-
-  // Action Buttons
-  completeBtn: { backgroundColor: '#137333', padding: 11, borderRadius: 8, alignItems: 'center', marginTop: 10 },
-  pendingReviewBtn: { backgroundColor: '#E67E22', padding: 11, borderRadius: 8, alignItems: 'center', marginTop: 10 },
-  completeBtnText: { color: '#FFF', fontWeight: 'bold', fontSize: 14 },
-
-  // Parent Approval Buttons
-  approvalRow: { flexDirection: 'row', gap: 10, marginTop: 12 },
-  approveBtn: { flex: 2, backgroundColor: '#137333', padding: 11, borderRadius: 8, alignItems: 'center' },
-  approveBtnText: { color: '#FFF', fontWeight: 'bold', fontSize: 14 },
-  denyBtn: { flex: 1, backgroundColor: '#D93025', padding: 11, borderRadius: 8, alignItems: 'center' },
-  denyBtnText: { color: '#FFF', fontWeight: 'bold', fontSize: 14 },
-
-  // Approved Footer
-  approvedFooter: {
-    marginTop: 10,
-    backgroundColor: '#E6F4EA',
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    borderRadius: 8,
-    alignItems: 'center',
-  },
-  approvedFooterText: { color: '#137333', fontWeight: '700', fontSize: 13 },
-
-  emptyText: { textAlign: 'center', color: '#888', marginTop: 30 },
+  photoPlaceholder: { fontSize: 12, fontWeight: '600', color: '#7E979E', textAlign: 'center' },
+  uploadingText: { fontSize: 12, color: '#5FC7BA', marginTop: 8, textAlign: 'center' },
+  completeBtn: { backgroundColor: '#2A9D8F', padding: 13, borderRadius: 10, alignItems: 'center', marginTop: 12 },
+  pendingReviewBtn: { backgroundColor: '#F4A261', padding: 13, borderRadius: 10, alignItems: 'center', marginTop: 12 },
+  pendingReviewText: { color: '#EAF2F2', fontWeight: '700', fontSize: 13, textAlign: 'center' },
+  completeBtnText: { color: '#0C2127', fontWeight: '700', fontSize: 13, textAlign: 'center' },
+  approvalRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginTop: 12 },
+  approveBtn: { flexGrow: 2, backgroundColor: '#2A9D8F', padding: 13, borderRadius: 10, alignItems: 'center' },
+  approveBtnText: { color: '#0C2127', fontWeight: '700', fontSize: 13 },
+  denyBtn: { flexGrow: 1, backgroundColor: '#3B2724', padding: 13, borderRadius: 10, alignItems: 'center' },
+  denyBtnText: { color: '#F08A72', fontWeight: '700', fontSize: 13 },
+  approvedFooter: { marginTop: 12, backgroundColor: '#1B3A3A', padding: 10, borderRadius: 10, alignItems: 'center' },
+  approvedFooterText: { color: '#5FC7BA', fontWeight: '700', fontSize: 12 },
+  emptyText: { textAlign: 'center', color: '#7E979E', marginTop: 20, padding: 26, backgroundColor: '#1E3139', borderRadius: 16, overflow: 'hidden' },
 });
