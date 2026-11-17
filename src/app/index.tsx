@@ -105,6 +105,7 @@ export default function HomeScreen() {
   const [pointsInput, setPointsInput] = useState('10');
   const [dueDate, setDueDate] = useState(() => startOfDay(new Date()));
   const [dueTime, setDueTime] = useState('18:00');
+  const [assignOpen, setAssignOpen] = useState(false);
   const [selectedKidId, setSelectedKidId] = useState<string>('');
 
   // New chore template states
@@ -422,6 +423,7 @@ export default function HomeScreen() {
       fetchChores(profile);
       setChorePage('todo');
       setOperationError('');
+      setAssignOpen(false);
       router.push({
         pathname: '/chore-assigned',
         params: {
@@ -680,7 +682,12 @@ export default function HomeScreen() {
         </>
       )}
 
-      {profile.role === 'parent' && section !== 'dashboard' && (
+      {profile.role === 'parent' && section !== 'dashboard' && (section === 'chores' && !assignOpen ? (
+        <TouchableOpacity style={styles.assignPrompt} onPress={() => setAssignOpen(true)}>
+          <Text style={styles.assignPromptPlus}>+</Text>
+          <Text style={styles.assignPromptText}>Assign a chore</Text>
+        </TouchableOpacity>
+      ) : (
         <View style={styles.assignBox}>
           <View style={styles.sectionHeading}><View><Text style={styles.sectionKicker}>{section === 'setup' ? 'FAMILY SETTINGS' : section === 'chores' ? 'ASSIGN A CHORE' : 'PRIZE CLAIMS'}</Text><Text style={styles.sectionTitle}>{section === 'setup' ? 'Make it yours' : section === 'chores' ? 'Give someone a task' : 'Claimed prizes'}</Text></View></View>
           {section === 'setup' && <View style={styles.tabRow}>
@@ -852,6 +859,11 @@ export default function HomeScreen() {
               <TouchableOpacity style={styles.addBtn} onPress={handleAssignChore}>
                 <Text style={styles.addBtnText}>Assign Chore</Text>
               </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.hideAssignBtn}
+                onPress={() => { setAssignOpen(false); setOperationError(''); }}>
+                <Text style={styles.hideAssignText}>Cancel</Text>
+              </TouchableOpacity>
             </>
           )}
 
@@ -947,7 +959,7 @@ export default function HomeScreen() {
             </View>
           )}
         </View>
-      )}
+      ))}
     </>
   );
 
@@ -1211,6 +1223,11 @@ const styles = StyleSheet.create({
   quickLinkDescription: { color: '#A9C0C6', fontSize: 12, marginTop: 5 },
   removeBtn: { backgroundColor: '#3B2724', paddingHorizontal: 12, paddingVertical: 10, borderRadius: 9 },
   removeBtnText: { color: '#F08A72', fontSize: 12, fontWeight: '700' },
+  assignPrompt: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, backgroundColor: '#1E3139', borderWidth: 1, borderColor: '#2E4750', borderRadius: 16, paddingVertical: 16, marginBottom: 18 },
+  assignPromptPlus: { color: '#5FC7BA', fontSize: 18, fontWeight: '800' },
+  assignPromptText: { color: '#EAF2F2', fontSize: 14, fontWeight: '800' },
+  hideAssignBtn: { alignItems: 'center', paddingVertical: 12 },
+  hideAssignText: { color: '#A9C0C6', fontSize: 12, fontWeight: '700' },
   dueRow: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 8, marginTop: 7 },
   dueText: { color: '#A9C0C6', fontSize: 12 },
   lateTag: { backgroundColor: '#3B2724', color: '#F08A72', fontSize: 10, fontWeight: '800', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 20, overflow: 'hidden' },
