@@ -70,6 +70,30 @@ type Redemption = {
   status: 'pending' | 'fulfilled';
 };
 
+type Goal = {
+  id: number;
+  created_at: string;
+  family_code: string;
+  kid_id: string;
+  title: string;
+  details: string | null;
+  bonus_points: number;
+  status: 'active' | 'pending' | 'achieved' | 'archived';
+  completed_at: string | null;
+  achieved_at: string | null;
+  awarded_points: number;
+};
+
+type PointAdjustment = {
+  id: number;
+  created_at: string;
+  family_code: string;
+  kid_id: string;
+  parent_name: string;
+  amount: number;
+  note: string;
+};
+
 export default function HomeScreen() {
   const [session, setSession] = useState<Session | null>(null);
   const [profile, setProfile] = useState<Profile | null>(null);
@@ -82,6 +106,8 @@ export default function HomeScreen() {
   const [memberBusy, setMemberBusy] = useState(false);
   const [choreError, setChoreError] = useState(false);
   const [redemptionError, setRedemptionError] = useState(false);
+  const [goalsError, setGoalsError] = useState(false);
+  const [pointNotesError, setPointNotesError] = useState(false);
   const { section: sectionParam } = useLocalSearchParams<{ section?: string }>();
   const section = ['chores', 'prizes', 'setup'].includes(sectionParam ?? '') ? sectionParam : 'dashboard';
   const [templates, setTemplates] = useState<ChoreTemplate[]>([]);
@@ -93,7 +119,7 @@ export default function HomeScreen() {
 
   // Page / Tab navigation
   const [chorePage, setChorePage] = useState<'todo' | 'needs_approval' | 'approved'>('todo');
-  const [parentPanel, setParentPanel] = useState<'new_template' | 'prizes' | 'invite' | 'members' | 'defaults'>('invite');
+  const [parentPanel, setParentPanel] = useState<'new_template' | 'prizes' | 'invite' | 'members' | 'defaults' | 'goals' | 'points'>('invite');
   const [operationError, setOperationError] = useState('');
   const [inviteRole, setInviteRole] = useState<'parent' | 'kid'>('kid');
   const [inviteCode, setInviteCode] = useState('');
@@ -116,6 +142,24 @@ export default function HomeScreen() {
   const [newRewardTitle, setNewRewardTitle] = useState('');
   const [newRewardCost, setNewRewardCost] = useState('25');
 
+  // Long-term goals and manual point changes
+  const [goals, setGoals] = useState<Goal[]>([]);
+  const [goalKidId, setGoalKidId] = useState('');
+  const [goalTitle, setGoalTitle] = useState('');
+  const [goalDetails, setGoalDetails] = useState('');
+  const [goalBonus, setGoalBonus] = useState('50');
+  const [goalBusy, setGoalBusy] = useState(false);
+  const [pointAdjustments, setPointAdjustments] = useState<PointAdjustment[]>([]);
+  const [adjustKidId, setAdjustKidId] = useState('');
+  const [adjustDirection, setAdjustDirection] = useState<'add' | 'take'>('add');
+  const [adjustAmount, setAdjustAmount] = useState('5');
+  const [adjustNote, setAdjustNote] = useState('');
+  const [adjustBusy, setAdjustBusy] = useState(false);
+
+  // Removing a chore or prize from the family setup lists
+  const [removal, setRemoval] = useState<{ kind: 'template' | 'reward'; id: number; title: string } | null>(null);
+  const [removalBusy, setRemovalBusy] = useState(false);
+
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session);
@@ -136,6 +180,10 @@ export default function HomeScreen() {
         setTemplates([]);
         setRewards([]);
         setRedemptions([]);
+        setGoals([]);
+        setPointAdjustments([]);
+        setGoalsError(false);
+        setPointNotesError(false);
         setMemberToRemove(null);
         setMemberError('');
         setOperationError('');
@@ -173,6 +221,8 @@ export default function HomeScreen() {
       fetchChores(userProfile),
       fetchRewards(userProfile.family_code),
       fetchRedemptions(userProfile),
+      fetchGoals(userProfile),
+      fetchPointAdjustments(userProfile),
     ]);
 
     setLoading(false);
@@ -185,7 +235,10 @@ export default function HomeScreen() {
     const familyKids = familyMembers.filter((person) => person.role === 'kid');
     setMembers(familyMembers);
     setKids(familyKids);
-    setSelectedKidId((previous) => familyKids.some((kid) => kid.id === previous) ? previous : (familyKids[0]?.id ?? ''));
+    const firstKidId = familyKids[0]?.id ?? '';
+    setSelectedKidId((previous) => familyKids.some((kid) => kid.id === previous) ? previous : firstKidId);
+    setGoalKidId((previous) => familyKids.some((kid) => kid.id === previous) ? previous : firstKidId);
+    setAdjustKidId((previous) => familyKids.some((kid) => kid.id === previous) ? previous : firstKidId);
     setMemberError('');
   }
 
@@ -284,6 +337,38 @@ export default function HomeScreen() {
     if (data) setRedemptions(data);
   }
 
+  async function fetchGoals(currentProfile: Profile) {
+    let query = supabase
+      .from('goals')
+      .select('*')
+      .eq('family_code', currentProfile.family_code)
+      .order('id', { ascending: false });
+
+    if (currentProfile.role === 'kid') {
+      query = query.eq('kid_id', currentProfile.id);
+    }
+
+    const { data, error } = await query;
+    setGoalsError(!!error);
+    if (data) setGoals(data as Goal[]);
+  }
+
+  async function fetchPointAdjustments(currentProfile: Profile) {
+    let query = supabase
+      .from('point_adjustments')
+      .select('*')
+      .eq('family_code', currentProfile.family_code)
+      .order('id', { ascending: false });
+
+    if (currentProfile.role === 'kid') {
+      query = query.eq('kid_id', currentProfile.id);
+    }
+
+    const { data, error } = await query;
+    setPointNotesError(!!error);
+    if (data) setPointAdjustments(data as PointAdjustment[]);
+  }
+
   // A chore earns its full value when finished by the due time, and half
   // when finished after it. The database applies the same rule on approval.
   function choreFullPoints(chore: Chore) {
@@ -318,7 +403,13 @@ export default function HomeScreen() {
     .reduce((sum, c) => sum + c.points, 0);
 
   const spentPoints = redemptions.reduce((sum, r) => sum + r.points_spent, 0);
-  const availablePoints = Math.max(0, earnedPoints - spentPoints);
+  // Goal bonuses and parent deductions live in their own ledger, and both the
+  // app and the database include them in what a child can spend.
+  const adjustmentTotal = pointAdjustments.reduce((sum, adjustment) => sum + adjustment.amount, 0);
+  const availablePoints = Math.max(0, earnedPoints + adjustmentTotal - spentPoints);
+  // A child marks a goal done ('pending'), and a parent confirms it ('achieved').
+  const pendingGoals = goals.filter((goal) => goal.status === 'pending');
+  const kidGoals = goals.filter((goal) => goal.status === 'active' || goal.status === 'pending');
 
   async function handleCreateInvitation() {
     setInviteCode('');
@@ -360,6 +451,40 @@ export default function HomeScreen() {
     setTemplates((prev) =>
       prev.map((t) => (t.id === selectedTemplateId ? { ...t, default_points: parsedPoints } : t))
     );
+  }
+
+  async function handleConfirmRemoval() {
+    if (!profile || !removal) return;
+    setRemovalBusy(true);
+    setOperationError('');
+
+    const { error } = removal.kind === 'template'
+      ? await supabase.from('chore_templates').delete().eq('id', removal.id)
+      : await supabase.from('rewards').delete().eq('id', removal.id);
+
+    if (error) {
+      setOperationError(
+        error.code === '42501'
+          ? 'Removing chores and prizes needs the family setup removal database update applied first.'
+          : error.message
+      );
+      setRemovalBusy(false);
+      return;
+    }
+
+    if (removal.kind === 'template') {
+      const next = templates.filter((tpl) => tpl.id !== removal.id);
+      setTemplates(next);
+      if (selectedTemplateId === removal.id) {
+        setSelectedTemplateId(next[0]?.id ?? null);
+        setPointsInput(next[0]?.default_points.toString() ?? '10');
+      }
+    } else {
+      setRewards((prev) => prev.filter((reward) => reward.id !== removal.id));
+    }
+
+    setRemoval(null);
+    setRemovalBusy(false);
   }
 
   async function handleCreateTemplate() {
@@ -522,6 +647,99 @@ export default function HomeScreen() {
     } else setOperationError(error.message);
   }
 
+  function databaseUpdateHint(error: { code?: string } | null) {
+    return ['42P01', 'PGRST205', 'PGRST202', '42501'].includes(error?.code ?? '')
+      ? 'Goals and point changes need the goals & points database update applied first.'
+      : null;
+  }
+
+  async function handleCreateGoal() {
+    if (!profile) return;
+    const kid = kids.find((member) => member.id === goalKidId);
+    if (!kid) { setOperationError('Choose a child for this goal first.'); return; }
+    if (!goalTitle.trim()) { setOperationError('Give the goal a name.'); return; }
+
+    const bonus = Number(goalBonus);
+    if (!goalBonus.trim() || !Number.isInteger(bonus) || bonus < 0 || bonus > 10000) {
+      setOperationError('Enter the bonus as a whole number between 0 and 10000.');
+      return;
+    }
+
+    setGoalBusy(true);
+    setOperationError('');
+    const { error } = await supabase.from('goals').insert({
+      family_code: profile.family_code,
+      kid_id: kid.id,
+      title: goalTitle.trim(),
+      details: goalDetails.trim() || null,
+      bonus_points: bonus,
+      created_by: profile.id,
+    });
+
+    if (error) setOperationError(databaseUpdateHint(error) ?? error.message);
+    else {
+      setGoalTitle('');
+      setGoalDetails('');
+      setGoalBonus('50');
+      await fetchGoals(profile);
+    }
+    setGoalBusy(false);
+  }
+
+  async function handleUpdateGoalStatus(goal: Goal, status: 'active' | 'achieved' | 'archived') {
+    if (!profile) return;
+    setGoalBusy(true);
+    setOperationError('');
+    const { error } = await supabase.from('goals').update({ status }).eq('id', goal.id);
+
+    if (error) setOperationError(databaseUpdateHint(error) ?? error.message);
+    else await Promise.all([fetchGoals(profile), fetchPointAdjustments(profile)]);
+    setGoalBusy(false);
+  }
+
+  // A child can only say “I finished this” (or take that back). The database
+  // trigger awards the bonus when a parent confirms it.
+  async function handleKidGoalStatus(goal: Goal, status: 'active' | 'pending') {
+    if (!profile) return;
+    setGoalBusy(true);
+    setOperationError('');
+    const { error } = await supabase.from('goals').update({ status }).eq('id', goal.id);
+
+    if (error) setOperationError(databaseUpdateHint(error) ?? error.message);
+    else await fetchGoals(profile);
+    setGoalBusy(false);
+  }
+
+  async function handleSaveAdjustment() {
+    if (!profile) return;
+    const kid = kids.find((member) => member.id === adjustKidId);
+    if (!kid) { setOperationError('Choose a child first.'); return; }
+
+    const amount = Number(adjustAmount);
+    if (!adjustAmount.trim() || !Number.isInteger(amount) || amount <= 0 || amount > 10000) {
+      setOperationError('Enter a whole number of points between 1 and 10000.');
+      return;
+    }
+    if (!adjustNote.trim()) { setOperationError('Add a note so your child knows why.'); return; }
+
+    setAdjustBusy(true);
+    setOperationError('');
+    const { error } = await supabase.from('point_adjustments').insert({
+      family_code: profile.family_code,
+      kid_id: kid.id,
+      amount: adjustDirection === 'add' ? amount : -amount,
+      note: adjustNote.trim(),
+    });
+
+    if (error) setOperationError(databaseUpdateHint(error) ?? error.message);
+    else {
+      setAdjustNote('');
+      setAdjustAmount('5');
+      await fetchPointAdjustments(profile);
+    }
+    setAdjustBusy(false);
+  }
+
   async function handleFulfillRedemption(redemptionId: number) {
     if (!profile) return;
     const { error } = await supabase
@@ -672,6 +890,88 @@ export default function HomeScreen() {
             <View style={styles.overviewStat}><Text style={styles.overviewStatLabel}>APPROVED CHORES</Text><Text style={styles.overviewStatValue}>{choreError ? '—' : approvedChores.length}</Text><Text style={styles.overviewStatCaption}>A job well done</Text></View>
             <View style={styles.overviewStat}><Text style={styles.overviewStatLabel}>{profile.role === 'parent' ? 'PRIZES TO GIVE' : 'YOUR POINTS'}</Text><Text style={styles.overviewStatValue}>{redemptionError || (profile.role === 'kid' && choreError) ? '—' : profile.role === 'parent' ? pendingClaimsCount : availablePoints}</Text><Text style={styles.overviewStatCaption}>{profile.role === 'parent' ? 'Claimed prizes waiting' : 'Available to spend'}</Text></View>
           </View>
+          {profile.role === 'parent' && pendingGoals.length > 0 && (
+            <>
+              <Text style={styles.overviewHeading}>Goals waiting for you</Text>
+              {pendingGoals.map((goal) => (
+                <View key={goal.id} style={styles.goalCard}>
+                  <View style={styles.goalRow}>
+                    <Text style={styles.goalTitle}>{goal.title}</Text>
+                    <View style={styles.goalBonus}><Text style={styles.goalBonusText}>+{goal.bonus_points} pts</Text></View>
+                  </View>
+                  <Text style={styles.goalHint}>
+                    {kids.find((kid) => kid.id === goal.kid_id)?.full_name ?? 'Your child'} marked this done. Confirm it to add the bonus.
+                  </Text>
+                  <View style={styles.pointsRow}>
+                    <TouchableOpacity style={styles.approveBtn} onPress={() => handleUpdateGoalStatus(goal, 'achieved')} disabled={goalBusy}>
+                      <Text style={styles.approveBtnText}>Confirm &amp; give {goal.bonus_points} pts</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity style={styles.removeBtn} onPress={() => handleUpdateGoalStatus(goal, 'active')} disabled={goalBusy}>
+                      <Text style={styles.removeBtnText}>Not yet</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              ))}
+            </>
+          )}
+          {profile.role === 'kid' && kidGoals.length > 0 && (
+            <>
+              <Text style={styles.overviewHeading}>Your long-term goals</Text>
+              {kidGoals.map((goal) => (
+                <View key={goal.id} style={styles.goalCard}>
+                  <View style={styles.goalRow}>
+                    <Text style={styles.goalTitle}>{goal.title}</Text>
+                    <View style={[styles.goalBonus, goal.status === 'pending' && styles.goalWaitingBadge]}>
+                      <Text style={[styles.goalBonusText, goal.status === 'pending' && styles.goalWaitingText]}>
+                        {goal.status === 'pending' ? 'Waiting for a parent' : `+${goal.bonus_points} pts`}
+                      </Text>
+                    </View>
+                  </View>
+                  {!!goal.details && <Text style={styles.goalDetails}>{goal.details}</Text>}
+                  {goal.status === 'pending' ? (
+                    <>
+                      <Text style={styles.goalHint}>You marked this done. A parent will confirm it and add your {goal.bonus_points} bonus points.</Text>
+                      <TouchableOpacity style={styles.goalTextBtn} onPress={() => handleKidGoalStatus(goal, 'active')} disabled={goalBusy}>
+                        <Text style={styles.goalTextBtnLabel}>Not done yet — take it back</Text>
+                      </TouchableOpacity>
+                    </>
+                  ) : (
+                    <>
+                      <Text style={styles.goalHint}>Keep going! When you reach it, mark it done so a parent can confirm the bonus.</Text>
+                      <TouchableOpacity style={styles.goalDoneBtn} onPress={() => handleKidGoalStatus(goal, 'pending')} disabled={goalBusy}>
+                        <Text style={styles.goalDoneBtnText}>Mark as done</Text>
+                      </TouchableOpacity>
+                    </>
+                  )}
+                </View>
+              ))}
+            </>
+          )}
+          {profile.role === 'kid' && goalsError && (
+            <Text style={styles.inviteError}>Goals could not be loaded. The goals database update may not be applied yet.</Text>
+          )}
+          {profile.role === 'kid' && !!operationError && <Text style={styles.inviteError}>{operationError}</Text>}
+
+          {profile.role === 'kid' && pointNotesError && (
+            <Text style={styles.inviteError}>Point notes could not be loaded. The goals &amp; points database update may not be applied yet.</Text>
+          )}
+          {profile.role === 'kid' && pointAdjustments.length > 0 && (
+            <>
+              <Text style={styles.overviewHeading}>Why your points changed</Text>
+              {pointAdjustments.slice(0, 6).map((adjustment) => (
+                <View key={adjustment.id} style={styles.noteRow}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.claimTitle}>{adjustment.note}</Text>
+                    <Text style={styles.claimSub}>{adjustment.parent_name} • {formatAssignedDate(adjustment.created_at)}</Text>
+                  </View>
+                  <Text style={[styles.noteAmount, adjustment.amount < 0 && styles.noteAmountNegative]}>
+                    {adjustment.amount > 0 ? '+' : ''}{adjustment.amount} pts
+                  </Text>
+                </View>
+              ))}
+            </>
+          )}
+
           <Text style={styles.overviewHeading}>Where to next?</Text>
           <View style={styles.quickLinks}>
             <Link href="/?section=chores" asChild><TouchableOpacity style={styles.quickLink}><Text style={styles.quickLinkIcon}>✓</Text><Text style={styles.quickLinkTitle}>Chores  →</Text><Text style={styles.quickLinkDescription}>{profile.role === 'parent' ? 'Assign and review chores' : 'See your chore list'}</Text></TouchableOpacity></Link>
@@ -692,8 +992,8 @@ export default function HomeScreen() {
           <View style={styles.sectionHeading}><View><Text style={styles.sectionKicker}>{section === 'setup' ? 'FAMILY SETTINGS' : section === 'chores' ? 'ASSIGN A CHORE' : 'PRIZE CLAIMS'}</Text><Text style={styles.sectionTitle}>{section === 'setup' ? 'Make it yours' : section === 'chores' ? 'Give someone a task' : 'Claimed prizes'}</Text></View></View>
           {section === 'setup' && <View style={styles.tabRow}>
             {([
-              ['invite', 'Invite'], ['members', 'Members'], ['new_template', 'Chores'], ['defaults', 'Default points'], ['prizes', 'Prizes'],
-            ] as const).map(([key, label]) => <TouchableOpacity key={key} style={[styles.tabBtn, parentPanel === key && styles.tabBtnActive]} onPress={() => { setParentPanel(key); setOperationError(''); }}><Text style={[styles.tabText, parentPanel === key && styles.tabTextActive]}>{label}</Text></TouchableOpacity>)}
+              ['invite', 'Invite'], ['members', 'Members'], ['new_template', 'Chores'], ['defaults', 'Default points'], ['prizes', 'Prizes'], ['goals', 'Goals'], ['points', 'Points'],
+            ] as const).map(([key, label]) => <TouchableOpacity key={key} style={[styles.tabBtn, parentPanel === key && styles.tabBtnActive]} onPress={() => { setParentPanel(key); setOperationError(''); setRemoval(null); }}><Text style={[styles.tabText, parentPanel === key && styles.tabTextActive]}>{key === 'goals' && pendingGoals.length > 0 ? `${label} • ${pendingGoals.length}` : label}</Text></TouchableOpacity>)}
           </View>}
           {!!operationError && <Text style={styles.inviteError}>{operationError}</Text>}
 
@@ -888,7 +1188,18 @@ export default function HomeScreen() {
                 <Text style={styles.addBtnText}>Save to Chore List</Text>
               </TouchableOpacity>
               <Text style={styles.label}>Your chores</Text>
-              <View style={styles.templateWrap}>{templates.map((tpl) => <View key={tpl.id} style={styles.rewardTag}><Text style={styles.rewardTagText}>{tpl.title} · {tpl.default_points} pts</Text></View>)}</View>
+              <View style={styles.templateWrap}>{templates.map((tpl) => (
+                <View key={tpl.id} style={[styles.rewardTag, styles.removableTag]}>
+                  <Text style={styles.rewardTagText}>{tpl.title} · {tpl.default_points} pts</Text>
+                  <TouchableOpacity
+                    style={styles.removeTagBtn}
+                    onPress={() => { setRemoval({ kind: 'template', id: tpl.id, title: tpl.title }); setOperationError(''); }}
+                    accessibilityLabel={`Remove ${tpl.title}`}>
+                    <Text style={styles.removeTagText}>✕</Text>
+                  </TouchableOpacity>
+                </View>
+              ))}</View>
+              {templates.length === 0 && <Text style={styles.inviteHelp}>No chores in the list yet.</Text>}
             </>
           )}
 
@@ -917,14 +1228,206 @@ export default function HomeScreen() {
               <Text style={styles.label}>Active Prizes:</Text>
               <View style={styles.templateWrap}>
                 {rewards.map((r) => (
-                  <View key={r.id} style={styles.rewardTag}>
+                  <View key={r.id} style={[styles.rewardTag, styles.removableTag]}>
                     <Text style={styles.rewardTagText}>
                       🎁 {r.title} ({r.point_cost} pts)
                     </Text>
+                    <TouchableOpacity
+                      style={styles.removeTagBtn}
+                      onPress={() => { setRemoval({ kind: 'reward', id: r.id, title: r.title }); setOperationError(''); }}
+                      accessibilityLabel={`Remove ${r.title}`}>
+                      <Text style={styles.removeTagText}>✕</Text>
+                    </TouchableOpacity>
                   </View>
                 ))}
               </View>
+              {rewards.length === 0 && <Text style={styles.inviteHelp}>No prizes added yet.</Text>}
 
+            </View>
+          )}
+          {section === 'setup' && parentPanel === 'goals' && (
+            <View>
+              <Text style={styles.inviteHelp}>Long-term goals stay on your child’s dashboard until they reach them. Your child marks one done, then you confirm it here to give the bonus points once.</Text>
+              <Text style={styles.label}>Who is this goal for?</Text>
+              <View style={styles.kidPicker}>
+                {kids.map((kid) => (
+                  <TouchableOpacity
+                    key={kid.id}
+                    style={[styles.kidChip, goalKidId === kid.id && styles.kidChipActive]}
+                    onPress={() => setGoalKidId(kid.id)}>
+                    <Text style={[styles.kidChipText, goalKidId === kid.id && styles.kidChipTextActive]}>{kid.full_name}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+              {kids.length === 0 && <Text style={styles.inviteHelp}>Invite a child before adding a goal.</Text>}
+
+              <Text style={styles.label}>Goal</Text>
+              <TextInput
+                style={styles.input}
+                placeholder="e.g., Read 10 chapter books"
+                placeholderTextColor="#7E979E"
+                value={goalTitle}
+                onChangeText={setGoalTitle}
+              />
+              <Text style={styles.label}>Details (optional)</Text>
+              <TextInput
+                style={[styles.input, styles.multilineInput]}
+                multiline
+                placeholder="What does finishing it look like?"
+                placeholderTextColor="#7E979E"
+                value={goalDetails}
+                onChangeText={setGoalDetails}
+              />
+              <Text style={styles.label}>Bonus points</Text>
+              <TextInput
+                style={[styles.input, { width: 110 }]}
+                keyboardType="numeric"
+                value={goalBonus}
+                onChangeText={setGoalBonus}
+              />
+              <TouchableOpacity style={styles.addBtn} onPress={handleCreateGoal} disabled={goalBusy}>
+                {goalBusy ? <ActivityIndicator color="#0C2127" /> : <Text style={styles.addBtnText}>Add goal</Text>}
+              </TouchableOpacity>
+
+              <Text style={styles.label}>Goals</Text>
+              {goalsError && <Text style={styles.inviteError}>Goals could not be loaded. The goals &amp; points database update may not be applied yet.</Text>}
+              {goals.length === 0 && !goalsError && <Text style={styles.inviteHelp}>No goals yet.</Text>}
+              {goals.map((goal) => (
+                <View key={goal.id} style={styles.goalCard}>
+                  <View style={styles.goalRow}>
+                    <Text style={styles.claimTitle}>{goal.title}</Text>
+                    <View style={[styles.goalBonus, goal.status === 'pending' && styles.goalWaitingBadge]}>
+                      <Text style={[styles.goalBonusText, goal.status === 'pending' && styles.goalWaitingText]}>
+                        {goal.status === 'achieved'
+                          ? `+${goal.awarded_points} given`
+                          : goal.status === 'pending' ? `+${goal.bonus_points} waiting` : `+${goal.bonus_points} pts`}
+                      </Text>
+                    </View>
+                  </View>
+                  <Text style={styles.claimSub}>
+                    {kids.find((kid) => kid.id === goal.kid_id)?.full_name ?? 'Child'} •{' '}
+                    {goal.status === 'achieved' ? 'Achieved'
+                      : goal.status === 'archived' ? 'Archived'
+                      : goal.status === 'pending' ? 'Marked done — needs your confirmation' : 'In progress'}
+                  </Text>
+                  {!!goal.details && <Text style={styles.goalDetails}>{goal.details}</Text>}
+                  {(goal.status === 'active' || goal.status === 'pending') && (
+                    <View style={styles.pointsRow}>
+                      <TouchableOpacity
+                        style={styles.approveBtn}
+                        onPress={() => handleUpdateGoalStatus(goal, 'achieved')}
+                        disabled={goalBusy}>
+                        <Text style={styles.approveBtnText}>
+                          {goal.status === 'pending' ? `Confirm & give ${goal.bonus_points} pts` : 'Mark achieved'}
+                        </Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        style={styles.removeBtn}
+                        onPress={() => handleUpdateGoalStatus(goal, goal.status === 'pending' ? 'active' : 'archived')}
+                        disabled={goalBusy}>
+                        <Text style={styles.removeBtnText}>{goal.status === 'pending' ? 'Send back' : 'Archive'}</Text>
+                      </TouchableOpacity>
+                    </View>
+                  )}
+                </View>
+              ))}
+            </View>
+          )}
+
+          {section === 'setup' && parentPanel === 'points' && (
+            <View>
+              <Text style={styles.inviteHelp}>Add or take away points yourself, with a note saying why. Your child sees the note and the change on their dashboard.</Text>
+              <Text style={styles.label}>Who?</Text>
+              <View style={styles.kidPicker}>
+                {kids.map((kid) => (
+                  <TouchableOpacity
+                    key={kid.id}
+                    style={[styles.kidChip, adjustKidId === kid.id && styles.kidChipActive]}
+                    onPress={() => setAdjustKidId(kid.id)}>
+                    <Text style={[styles.kidChipText, adjustKidId === kid.id && styles.kidChipTextActive]}>{kid.full_name}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+
+              <Text style={styles.label}>Add or take away?</Text>
+              <View style={styles.kidPicker}>
+                {([['add', 'Give points'], ['take', 'Take points']] as const).map(([key, label]) => (
+                  <TouchableOpacity
+                    key={key}
+                    style={[
+                      styles.kidChip,
+                      adjustDirection === key && (key === 'add' ? styles.kidChipActive : styles.kidChipNegative),
+                    ]}
+                    onPress={() => setAdjustDirection(key)}>
+                    <Text
+                      style={[
+                        styles.kidChipText,
+                        adjustDirection === key && (key === 'add' ? styles.kidChipTextActive : styles.kidChipTextNegative),
+                      ]}>
+                      {label}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+
+              <Text style={styles.label}>Points</Text>
+              <TextInput
+                style={[styles.input, { width: 110 }]}
+                keyboardType="numeric"
+                value={adjustAmount}
+                onChangeText={setAdjustAmount}
+              />
+              <Text style={styles.label}>Why?</Text>
+              <TextInput
+                style={styles.input}
+                placeholder="e.g., Threw a fit at bedtime"
+                placeholderTextColor="#7E979E"
+                value={adjustNote}
+                onChangeText={setAdjustNote}
+              />
+              <TouchableOpacity
+                style={[styles.addBtn, adjustDirection === 'take' && styles.takePointsBtn]}
+                onPress={handleSaveAdjustment}
+                disabled={adjustBusy}>
+                {adjustBusy
+                  ? <ActivityIndicator color="#0C2127" />
+                  : <Text style={styles.addBtnText}>{adjustDirection === 'add' ? 'Add points' : 'Take points away'}</Text>}
+              </TouchableOpacity>
+
+              <Text style={styles.label}>Recent point changes</Text>
+              {pointNotesError && <Text style={styles.inviteError}>Point changes could not be loaded. The goals &amp; points database update may not be applied yet.</Text>}
+              {pointAdjustments.length === 0 && !pointNotesError && <Text style={styles.inviteHelp}>No point changes yet.</Text>}
+              {pointAdjustments.slice(0, 20).map((adjustment) => (
+                <View key={adjustment.id} style={styles.noteRow}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.claimTitle}>{adjustment.note}</Text>
+                    <Text style={styles.claimSub}>
+                      {kids.find((kid) => kid.id === adjustment.kid_id)?.full_name ?? 'Child'} •{' '}
+                      {adjustment.parent_name} • {formatAssignedDate(adjustment.created_at)}
+                    </Text>
+                  </View>
+                  <Text style={[styles.noteAmount, adjustment.amount < 0 && styles.noteAmountNegative]}>
+                    {adjustment.amount > 0 ? '+' : ''}{adjustment.amount} pts
+                  </Text>
+                </View>
+              ))}
+            </View>
+          )}
+
+          {removal && section === 'setup' && (
+            (removal.kind === 'template' && parentPanel === 'new_template')
+            || (removal.kind === 'reward' && parentPanel === 'prizes')
+          ) && (
+            <View style={styles.removeConfirm}>
+              <Text style={styles.removeConfirmText}>Remove &quot;{removal.title}&quot;? Chores already assigned and prizes already claimed keep their history.</Text>
+              <View style={styles.removeConfirmActions}>
+                <TouchableOpacity style={styles.removeConfirmBtn} onPress={handleConfirmRemoval} disabled={removalBusy}>
+                  <Text style={styles.removeConfirmBtnText}>{removalBusy ? 'Removing…' : 'Remove'}</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={styles.keepBtn} onPress={() => setRemoval(null)} disabled={removalBusy}>
+                  <Text style={styles.keepBtnText}>Keep</Text>
+                </TouchableOpacity>
+              </View>
             </View>
           )}
           {section === 'prizes' && (
@@ -1303,6 +1806,36 @@ const styles = StyleSheet.create({
   pageTabTextActive: { color: '#0C2127' },
   rewardTag: { backgroundColor: '#3A3324', paddingHorizontal: 12, paddingVertical: 9, borderRadius: 10 },
   rewardTagText: { fontSize: 12, fontWeight: '700', color: '#E9C46A' },
+  multilineInput: { minHeight: 84, textAlignVertical: 'top' },
+  kidChipNegative: { backgroundColor: '#E76F51', borderColor: '#E76F51' },
+  kidChipTextNegative: { color: '#0C2127' },
+  takePointsBtn: { backgroundColor: '#E76F51' },
+  goalCard: { backgroundColor: '#172A31', borderRadius: 12, borderWidth: 1, borderColor: '#2E4750', padding: 14, marginBottom: 8 },
+  goalRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10 },
+  goalTitle: { flexShrink: 1, color: '#EAF2F2', fontSize: 15, fontWeight: '800' },
+  goalBonus: { backgroundColor: '#3A3324', borderRadius: 9, paddingHorizontal: 10, paddingVertical: 6 },
+  goalBonusText: { color: '#E9C46A', fontSize: 11, fontWeight: '800' },
+  goalDetails: { color: '#A9C0C6', fontSize: 13, lineHeight: 19, marginTop: 8 },
+  goalHint: { color: '#7E979E', fontSize: 11, marginTop: 10 },
+  goalWaitingBadge: { backgroundColor: '#3A2E24' },
+  goalWaitingText: { color: '#F4A261' },
+  goalDoneBtn: { backgroundColor: '#2A9D8F', borderRadius: 10, paddingVertical: 11, alignItems: 'center', marginTop: 12 },
+  goalDoneBtnText: { color: '#0C2127', fontSize: 13, fontWeight: '800' },
+  goalTextBtn: { marginTop: 10, paddingVertical: 4 },
+  goalTextBtnLabel: { color: '#A9C0C6', fontSize: 12, fontWeight: '700' },
+  noteRow: { flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: '#172A31', borderRadius: 12, borderWidth: 1, borderColor: '#2E4750', padding: 13, marginBottom: 8 },
+  noteAmount: { color: '#5FC7BA', fontSize: 14, fontWeight: '800' },
+  noteAmountNegative: { color: '#F08A72' },
+  removableTag: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  removeTagBtn: { width: 24, height: 24, borderRadius: 12, backgroundColor: '#3B2724', alignItems: 'center', justifyContent: 'center' },
+  removeTagText: { color: '#F08A72', fontSize: 12, fontWeight: '800' },
+  removeConfirm: { backgroundColor: '#172A31', borderWidth: 1, borderColor: '#3B2724', borderRadius: 12, padding: 14, marginTop: 4 },
+  removeConfirmText: { color: '#EAF2F2', fontSize: 13, lineHeight: 20 },
+  removeConfirmActions: { flexDirection: 'row', gap: 8, marginTop: 12 },
+  removeConfirmBtn: { flexGrow: 1, backgroundColor: '#3B2724', paddingVertical: 12, borderRadius: 10, alignItems: 'center' },
+  removeConfirmBtnText: { color: '#F08A72', fontSize: 13, fontWeight: '700' },
+  keepBtn: { flexGrow: 1, backgroundColor: '#20343C', paddingVertical: 12, borderRadius: 10, alignItems: 'center' },
+  keepBtnText: { color: '#EAF2F2', fontSize: 13, fontWeight: '700' },
   claimRow: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#172A31', padding: 12, borderRadius: 10, marginBottom: 6 },
   claimTitle: { fontSize: 13, fontWeight: '700', color: '#EAF2F2' },
   claimSub: { fontSize: 11, color: '#7E979E', marginTop: 4 },

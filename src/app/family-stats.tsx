@@ -9,6 +9,7 @@ type ChildStats = {
   child_name: string;
   completed_chores: number;
   points_earned: number;
+  points_adjusted: number | null;
   points_spent: number | null;
   points_available: number | null;
 };
@@ -103,6 +104,7 @@ export default function FamilyStatsScreen() {
               <View style={styles.statsGrid}>
                 <Stat label="CHORES COMPLETED" value={child.completed_chores} />
                 <Stat label="POINTS EARNED" value={child.points_earned} />
+                <Stat label="BONUSES / PENALTIES" value={child.points_adjusted} />
                 <Stat label="POINTS SPENT" value={child.points_spent} />
                 <Stat label="POINTS AVAILABLE" value={child.points_available} />
               </View>
