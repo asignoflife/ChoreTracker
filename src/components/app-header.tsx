@@ -2,10 +2,11 @@ import { Link, router } from 'expo-router';
 import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { supabase } from '../../lib/supabase';
 
-export type AppSection = 'dashboard' | 'chores' | 'prizes' | 'calendar' | 'setup' | 'profile';
+export type AppSection = 'dashboard' | 'hub' | 'chores' | 'prizes' | 'calendar' | 'setup' | 'profile';
 
 const COPY: Record<AppSection, { eyebrow: string; title: string; subtitle: string }> = {
   dashboard: { eyebrow: 'YOUR FAMILY DASHBOARD', title: '', subtitle: 'Here’s what’s happening at home.' },
+  hub: { eyebrow: 'FAMILY HOME HUB', title: 'Home hub', subtitle: 'A shared view for the family tablet.' },
   chores: { eyebrow: 'CHORETRACKER / CHORES', title: 'Chore board', subtitle: 'Keep the household moving, one chore at a time.' },
   prizes: { eyebrow: 'CHORETRACKER / PRIZES', title: 'Prizes', subtitle: 'See what everyone is working toward.' },
   calendar: { eyebrow: 'CHORETRACKER / CALENDAR', title: 'Family calendar', subtitle: 'Plans, appointments, and everything in between.' },
@@ -22,8 +23,9 @@ export function AppHeader({
   role: 'parent' | 'kid';
   section: AppSection;
 }) {
-  const items: { key: AppSection; label: string; href: '/' | '/calendar' | '/profile' | `/?section=${string}` }[] = [
+  const items: { key: AppSection; label: string; href: '/' | '/hub' | '/calendar' | '/profile' | `/?section=${string}` }[] = [
     { key: 'dashboard', label: 'Overview', href: '/' },
+    { key: 'hub', label: 'Home hub', href: '/hub' },
     { key: 'chores', label: 'Chores', href: '/?section=chores' },
     { key: 'prizes', label: 'Prizes', href: '/?section=prizes' },
     { key: 'calendar', label: 'Calendar', href: '/calendar' },

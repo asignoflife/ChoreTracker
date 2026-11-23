@@ -25,6 +25,7 @@ type MyProfile = {
   family_code: string;
   birthday: string | null;
   avatar_url: string | null;
+  hub_pin_set_at: string | null;
 };
 
 // Everyone's own corner: photo, name, birthday, and the two things that change
@@ -56,6 +57,12 @@ export default function ProfileScreen() {
   const [passwordMessage, setPasswordMessage] = useState('');
   const [passwordError, setPasswordError] = useState('');
 
+  const [hubPin, setHubPin] = useState('');
+  const [hubPinConfirm, setHubPinConfirm] = useState('');
+  const [hubPinBusy, setHubPinBusy] = useState(false);
+  const [hubPinMessage, setHubPinMessage] = useState('');
+  const [hubPinError, setHubPinError] = useState('');
+
   useEffect(() => {
     let cancelled = false;
 
@@ -80,7 +87,11 @@ export default function ProfileScreen() {
       if (error || !data) {
         setLoadError('Your profile could not be loaded. Check your connection and try again.');
       } else {
-        const loaded = { ...(data as MyProfile), avatar_url: (data as MyProfile).avatar_url ?? null };
+        const loaded = {
+          ...(data as MyProfile),
+          avatar_url: (data as MyProfile).avatar_url ?? null,
+          hub_pin_set_at: (data as MyProfile).hub_pin_set_at ?? null,
+        };
         setProfile(loaded);
         setName(loaded.full_name);
         setBirthday(loaded.birthday ? new Date(`${loaded.birthday}T00:00:00`) : null);
@@ -185,6 +196,38 @@ export default function ProfileScreen() {
     } finally {
       setPhotoBusy(false);
     }
+  }
+
+  async function handleSaveHubPin() {
+    if (!profile) return;
+    if (!/^\d{4,6}$/.test(hubPin)) {
+      setHubPinError('Choose a PIN of 4 to 6 digits.');
+      setHubPinMessage('');
+      return;
+    }
+    if (hubPin !== hubPinConfirm) {
+      setHubPinError('The two PINs do not match.');
+      setHubPinMessage('');
+      return;
+    }
+
+    setHubPinBusy(true);
+    setHubPinError('');
+    setHubPinMessage('');
+    const { error } = await supabase.rpc('set_my_hub_pin', { new_pin: hubPin });
+    if (error) {
+      setHubPinError(
+        ['PGRST202', 'PGRST205', '42883', '42P01'].includes(error.code ?? '')
+          ? 'Home hub PINs need the home hub database update applied first.'
+          : error.message
+      );
+    } else {
+      setProfile({ ...profile, hub_pin_set_at: new Date().toISOString() });
+      setHubPin('');
+      setHubPinConfirm('');
+      setHubPinMessage('PIN saved. Use it on the family tablet to mark your chores done.');
+    }
+    setHubPinBusy(false);
   }
 
   async function handleChangeEmail() {
@@ -316,6 +359,60 @@ export default function ProfileScreen() {
           {!!nameError && <Text style={styles.error}>{nameError}</Text>}
         </View>
 
+        {profile.role === 'kid' && (
+          <View style={styles.card}>
+            <Text style={styles.cardTitle}>Home hub PIN</Text>
+            <Text style={styles.caption}>
+              {profile.hub_pin_set_at
+                ? 'Your PIN is saved. Type it on the family tablet to mark your chores done. It is separate from your sign-in password.'
+                : 'Create a 4–6 digit PIN for the family tablet, separate from your sign-in password. You will use it there to mark your chores done.'}
+            </Text>
+            <View style={styles.pinFields}>
+              <TextInput
+                style={[styles.input, styles.pinField]}
+                value={hubPin}
+                onChangeText={(value) => {
+                  setHubPin(value.replace(/[^0-9]/g, ''));
+                  setHubPinError('');
+                  setHubPinMessage('');
+                }}
+                keyboardType="number-pad"
+                secureTextEntry
+                autoComplete="off"
+                textContentType="none"
+                maxLength={6}
+                placeholder={profile.hub_pin_set_at ? 'New PIN' : 'PIN'}
+                placeholderTextColor="#7E979E"
+              />
+              <TextInput
+                style={[styles.input, styles.pinField]}
+                value={hubPinConfirm}
+                onChangeText={(value) => {
+                  setHubPinConfirm(value.replace(/[^0-9]/g, ''));
+                  setHubPinError('');
+                  setHubPinMessage('');
+                }}
+                keyboardType="number-pad"
+                secureTextEntry
+                autoComplete="off"
+                textContentType="none"
+                maxLength={6}
+                placeholder="Repeat PIN"
+                placeholderTextColor="#7E979E"
+              />
+            </View>
+            <TouchableOpacity style={styles.primaryBtn} onPress={handleSaveHubPin} disabled={hubPinBusy}>
+              {hubPinBusy ? (
+                <ActivityIndicator color="#0C2127" />
+              ) : (
+                <Text style={styles.primaryBtnText}>{profile.hub_pin_set_at ? 'Change PIN' : 'Create PIN'}</Text>
+              )}
+            </TouchableOpacity>
+            {!!hubPinMessage && <Text style={styles.message}>{hubPinMessage}</Text>}
+            {!!hubPinError && <Text style={styles.error}>{hubPinError}</Text>}
+          </View>
+        )}
+
         <View style={styles.card}>
           <Text style={styles.cardTitle}>Sign-in email</Text>
           <Text style={styles.caption}>Currently {session.user.email}</Text>
@@ -390,6 +487,8 @@ const styles = StyleSheet.create({
   smallBtn: { backgroundColor: '#20343C', borderWidth: 1, borderColor: '#2E4750', borderRadius: 10, paddingHorizontal: 13, paddingVertical: 10 },
   smallBtnText: { color: '#EAF2F2', fontSize: 12, fontWeight: '700' },
   input: { backgroundColor: '#172A31', borderWidth: 1, borderColor: '#2E4750', borderRadius: 10, paddingHorizontal: 13, paddingVertical: 12, marginBottom: 10, color: '#EAF2F2', minHeight: 46 },
+  pinFields: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
+  pinField: { flexGrow: 1, flexBasis: 140 },
   primaryBtn: { backgroundColor: '#2A9D8F', borderRadius: 11, paddingVertical: 14, alignItems: 'center', marginTop: 4 },
   primaryBtnText: { color: '#0C2127', fontSize: 13, fontWeight: '800' },
   message: { color: '#5FC7BA', fontSize: 13, lineHeight: 19, marginTop: 12 },
