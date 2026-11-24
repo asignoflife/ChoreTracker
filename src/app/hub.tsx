@@ -1,8 +1,10 @@
-import { Link } from 'expo-router';
-import React, { useEffect, useMemo, useState } from 'react';
+import { Link, router, useFocusEffect } from 'expo-router';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
+  BackHandler,
   Image,
+  Platform,
   ScrollView,
   StyleSheet,
   Text,
@@ -87,6 +89,8 @@ function dueCopy(chore: Chore, now: Date) {
 // A wall display for the family tablet. It is read-mostly: today's chores by
 // kid, the week ahead, and the reward menu. The tablet stays signed in as a
 // parent, and a kid marks their own chore done by typing their hub PIN.
+// Leaving the hub for the parent app needs the parent's own unlock PIN, so the
+// shared screen stays a kiosk even though it holds a full parent session.
 export default function HomeHubScreen() {
   const [profile, setProfile] = useState<HubProfile | null>(null);
   const [people, setPeople] = useState<HubProfile[]>([]);
@@ -105,6 +109,16 @@ export default function HomeHubScreen() {
   const [pin, setPin] = useState('');
   const [pinBusy, setPinBusy] = useState(false);
   const [pinError, setPinError] = useState('');
+
+  // The tablet stays signed in as a parent, so the hub itself is the kiosk:
+  // parent controls stay behind the parent's own hub PIN until it is typed.
+  const [parentUnlocked, setParentUnlocked] = useState(false);
+  const [unlockOpen, setUnlockOpen] = useState(false);
+  const [unlockPin, setUnlockPin] = useState('');
+  const [unlockBusy, setUnlockBusy] = useState(false);
+  const [unlockError, setUnlockError] = useState('');
+  const [unlockTarget, setUnlockTarget] = useState<'/' | '/calendar' | null>(null);
+  const [signOutBusy, setSignOutBusy] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -193,6 +207,11 @@ export default function HomeHubScreen() {
       setPin('');
       setPinError('');
       setNotice('');
+      setParentUnlocked(false);
+      setUnlockOpen(false);
+      setUnlockPin('');
+      setUnlockError('');
+      setUnlockTarget(null);
     });
     return () => listener.subscription.unsubscribe();
   }, []);
@@ -220,6 +239,42 @@ export default function HomeHubScreen() {
     }, 60 * 1000);
     return () => clearInterval(refresh);
   }, [profile]);
+
+  // A parent who unlocks the tablet and walks away should not leave the app
+  // open. Relock the hub after a few minutes even if it is left untouched.
+  useEffect(() => {
+    if (!parentUnlocked) return;
+    const relock = setTimeout(() => {
+      setParentUnlocked(false);
+      setUnlockOpen(false);
+      setUnlockPin('');
+    }, 5 * 60 * 1000);
+    return () => clearTimeout(relock);
+  }, [parentUnlocked]);
+
+  // A parent can create or change the unlock PIN on their profile while the
+  // hub is mounted underneath. Pick that up when the hub regains focus so the
+  // tablet never sits unlocked because of a stale profile.
+  useFocusEffect(
+    useCallback(() => {
+      if (!profile) return;
+      let active = true;
+      (async () => {
+        const { data } = await supabase
+          .from('profiles')
+          .select('id, role, full_name, hub_pin_set_at')
+          .eq('id', profile.id)
+          .single();
+        if (!active || !data) return;
+        const fresh = data as Pick<HubProfile, 'id' | 'role' | 'full_name' | 'hub_pin_set_at'>;
+        setProfile((current) => (current ? { ...current, ...fresh } : current));
+        if (fresh.hub_pin_set_at) setParentUnlocked(false);
+      })();
+      return () => {
+        active = false;
+      };
+    }, [profile?.id])
+  );
 
   const today = useMemo(() => startOfDay(now), [now]);
   const weekDays = useMemo(() => Array.from({ length: 7 }, (_, index) => addDays(today, index)), [today]);
@@ -259,6 +314,95 @@ export default function HomeHubScreen() {
       ...birthdayOccurrences(people, today, addDays(today, 7)),
     ].sort((a, b) => a.start.getTime() - b.start.getTime());
   }, [events, people, today]);
+
+  const isParent = profile?.role === 'parent';
+  const hasParentPin = !!profile?.hub_pin_set_at;
+  const kioskLocked = isParent && hasParentPin && !parentUnlocked;
+
+  // Android's hardware back would otherwise pop straight back to the parent
+  // dashboard the tablet was on before the hub. While the kiosk is locked,
+  // back does nothing; the unlock PIN (or signing out) is the way out.
+  useEffect(() => {
+    if (Platform.OS !== 'android' || !kioskLocked) return;
+    const subscription = BackHandler.addEventListener('hardwareBackPress', () => true);
+    return () => subscription.remove();
+  }, [kioskLocked]);
+
+  function openUnlock(target: '/' | '/calendar' | null) {
+    setUnlockTarget(target);
+    setUnlockOpen(true);
+    setUnlockPin('');
+    setUnlockError('');
+    setNotice('');
+  }
+
+  function closeUnlock() {
+    if (unlockBusy) return;
+    setUnlockOpen(false);
+    setUnlockPin('');
+    setUnlockError('');
+    setUnlockTarget(null);
+  }
+
+  function openParentArea(target: '/' | '/calendar') {
+    if (isParent && kioskLocked) {
+      openUnlock(target);
+      return;
+    }
+    // Leaving the hub replaces it, so a back gesture cannot return to an
+    // unlocked hub after the parent has walked away.
+    if (isParent) router.replace(target);
+    else router.push(target);
+  }
+
+  async function submitUnlock() {
+    if (!/^\d{4,6}$/.test(unlockPin)) {
+      setUnlockError('Enter your 4–6 digit parent PIN.');
+      return;
+    }
+    setUnlockBusy(true);
+    setUnlockError('');
+    const { data, error: unlockFailure } = await supabase.rpc('verify_hub_unlock_pin', {
+      p_pin: unlockPin,
+    });
+
+    if (unlockFailure) {
+      setUnlockBusy(false);
+      setUnlockError(
+        ['PGRST202', 'PGRST205', '42883', '42P01'].includes(unlockFailure.code ?? '')
+          ? 'The hub kiosk lock needs its database update applied first.'
+          : unlockFailure.message
+      );
+      return;
+    }
+
+    const payload = Array.isArray(data) ? data[0] : data;
+    const result = (payload ?? {}) as PinResult;
+    if (!result.ok) {
+      setUnlockBusy(false);
+      setUnlockError(result.message || 'That PIN is not right.');
+      setUnlockPin('');
+      return;
+    }
+
+    const target = unlockTarget;
+    setUnlockBusy(false);
+    setUnlockOpen(false);
+    setUnlockPin('');
+    setUnlockTarget(null);
+    setParentUnlocked(true);
+    setNotice('Parent controls unlocked. They lock again when you leave the hub or after five minutes.');
+    setNow(new Date());
+    if (target) router.replace(target);
+  }
+
+  async function signOutOfHub() {
+    setSignOutBusy(true);
+    await supabase.auth.signOut();
+    setSignOutBusy(false);
+    setUnlockOpen(false);
+    setUnlockPin('');
+  }
 
   function openPin(chore: Chore) {
     setPinTarget(chore);
@@ -358,12 +502,86 @@ export default function HomeHubScreen() {
               {now.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}
             </Text>
           </View>
-          <Link href="/" asChild>
-            <TouchableOpacity style={styles.appLink}>
-              <Text style={styles.appLinkText}>Open family app</Text>
+          <View style={styles.hubActions}>
+            {isParent && hasParentPin && (
+              <TouchableOpacity
+                style={[styles.lockChip, !kioskLocked && styles.lockChipOpen]}
+                onPress={() => (kioskLocked ? openUnlock(null) : setParentUnlocked(false))}
+                accessibilityRole="button"
+                accessibilityLabel={kioskLocked ? 'Parent controls are locked' : 'Lock parent controls now'}>
+                <Text style={[styles.lockChipText, !kioskLocked && styles.lockChipTextOpen]}>
+                  {kioskLocked ? '🔒 Parent locked' : '🔓 Parent unlocked · Lock now'}
+                </Text>
+              </TouchableOpacity>
+            )}
+            <TouchableOpacity
+              style={styles.appLink}
+              onPress={() => openParentArea('/')}
+              accessibilityLabel={isParent && kioskLocked ? 'Unlock the parent app' : 'Open family app'}>
+              <Text style={styles.appLinkText}>
+                {isParent && kioskLocked ? 'Unlock parent app' : 'Open family app'}
+              </Text>
             </TouchableOpacity>
-          </Link>
+          </View>
         </View>
+
+        {isParent && !hasParentPin && (
+          <View style={styles.kioskHint}>
+            <Text style={styles.kioskHintText}>
+              This tablet is not locked. Create a parent unlock PIN so parent controls stay behind it.
+            </Text>
+            <TouchableOpacity onPress={() => router.push('/profile')}>
+              <Text style={styles.kioskHintLink}>Set unlock PIN →</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+
+        {unlockOpen && isParent && (
+          <View style={styles.unlockPanel}>
+            <View>
+              <Text style={styles.unlockKicker}>KIOSK LOCK</Text>
+              <Text style={styles.unlockTitle}>Parent unlock</Text>
+            </View>
+            <Text style={styles.unlockCopy}>
+              Type your home hub parent PIN to open the parent app. Kid PINs only mark chores done.
+            </Text>
+            <View style={styles.pinControls}>
+              <TextInput
+                style={styles.pinInput}
+                value={unlockPin}
+                onChangeText={(value) => {
+                  setUnlockPin(value.replace(/[^0-9]/g, ''));
+                  setUnlockError('');
+                }}
+                keyboardType="number-pad"
+                secureTextEntry
+                autoComplete="off"
+                textContentType="none"
+                maxLength={6}
+                autoFocus
+                placeholder="Parent PIN"
+                placeholderTextColor="#7E979E"
+                onSubmitEditing={submitUnlock}
+                returnKeyType="done"
+              />
+              <TouchableOpacity
+                style={[styles.pinConfirm, unlockBusy && styles.btnDisabled]}
+                onPress={submitUnlock}
+                disabled={unlockBusy}>
+                <Text style={styles.pinConfirmText}>{unlockBusy ? 'Checking…' : 'Unlock'}</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.pinCancel} onPress={closeUnlock} disabled={unlockBusy}>
+                <Text style={styles.pinCancelText}>Cancel</Text>
+              </TouchableOpacity>
+            </View>
+            {!!unlockError && <Text style={styles.pinError}>{unlockError}</Text>}
+            <TouchableOpacity style={styles.unlockSignOut} onPress={signOutOfHub} disabled={signOutBusy}>
+              <Text style={styles.unlockSignOutText}>
+                {signOutBusy ? 'Signing out…' : 'Forgot the PIN? Sign out, then sign back in as a parent.'}
+              </Text>
+            </TouchableOpacity>
+          </View>
+        )}
 
         {!!error && <Text style={styles.errorText}>{error}</Text>}
         {profile.role === 'kid' && (
@@ -523,11 +741,13 @@ export default function HomeHubScreen() {
                   <Text style={styles.panelKicker}>NEXT 7 DAYS</Text>
                   <Text style={styles.panelTitle}>Calendar</Text>
                 </View>
-                <Link href="/calendar" asChild>
-                  <TouchableOpacity>
-                    <Text style={styles.panelLink}>Full calendar →</Text>
-                  </TouchableOpacity>
-                </Link>
+                <TouchableOpacity
+                  onPress={() => openParentArea('/calendar')}
+                  accessibilityLabel={isParent && kioskLocked ? 'Unlock to open the full calendar' : 'Open the full calendar'}>
+                  <Text style={styles.panelLink}>
+                    {isParent && kioskLocked ? 'Unlock to open →' : 'Full calendar →'}
+                  </Text>
+                </TouchableOpacity>
               </View>
 
               {calendarError ? (
@@ -613,8 +833,22 @@ const styles = StyleSheet.create({
   clockBlock: { alignItems: 'flex-end' },
   clock: { color: '#E9C46A', fontSize: 32, fontWeight: '800', letterSpacing: -1, fontVariant: ['tabular-nums'] },
   clockDate: { color: '#A9C0C6', fontSize: 12, marginTop: 2 },
-  appLink: { borderWidth: 1, borderColor: '#2E4750', backgroundColor: '#1E3139', borderRadius: 12, paddingHorizontal: 16, paddingVertical: 12 },
+  appLink: { borderWidth: 1, borderColor: '#2E4750', backgroundColor: '#1E3139', borderRadius: 12, paddingHorizontal: 16, paddingVertical: 12, minHeight: 42, justifyContent: 'center' },
   appLinkText: { color: '#EAF2F2', fontSize: 12, fontWeight: '800' },
+  hubActions: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 8 },
+  lockChip: { borderWidth: 1, borderColor: '#3A3324', backgroundColor: '#241F18', borderRadius: 12, paddingHorizontal: 13, paddingVertical: 11, minHeight: 42, justifyContent: 'center' },
+  lockChipOpen: { borderColor: '#2A9D8F', backgroundColor: '#1B3A3A' },
+  lockChipText: { color: '#E9C46A', fontSize: 11, fontWeight: '800' },
+  lockChipTextOpen: { color: '#5FC7BA' },
+  kioskHint: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 10, marginTop: 16, backgroundColor: '#1E3139', borderWidth: 1, borderColor: '#3A3324', borderRadius: 12, padding: 13 },
+  kioskHintText: { flexGrow: 1, flexShrink: 1, flexBasis: 340, color: '#F4A261', fontSize: 12, lineHeight: 18 },
+  kioskHintLink: { color: '#5FC7BA', fontSize: 12, fontWeight: '800' },
+  unlockPanel: { marginTop: 16, backgroundColor: '#1A2D34', borderRadius: 16, borderWidth: 1, borderColor: '#E9C46A', padding: 16, gap: 10 },
+  unlockKicker: { color: '#E9C46A', fontSize: 9, fontWeight: '800', letterSpacing: 1.5 },
+  unlockTitle: { color: '#EAF2F2', fontSize: 19, fontWeight: '800', letterSpacing: -0.4, marginTop: 2 },
+  unlockCopy: { color: '#A9C0C6', fontSize: 12, lineHeight: 18 },
+  unlockSignOut: { paddingVertical: 4, alignSelf: 'flex-start' },
+  unlockSignOutText: { color: '#7E979E', fontSize: 11, textDecorationLine: 'underline' },
   errorText: { color: '#F08A72', fontSize: 13, marginTop: 16 },
   sessionHint: { color: '#F4A261', fontSize: 12, lineHeight: 18, marginTop: 12 },
   notice: { backgroundColor: '#1B3A3A', borderWidth: 1, borderColor: '#2A9D8F', borderRadius: 12, padding: 14, marginTop: 16 },

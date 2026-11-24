@@ -219,13 +219,19 @@ export default function ProfileScreen() {
       setHubPinError(
         ['PGRST202', 'PGRST205', '42883', '42P01'].includes(error.code ?? '')
           ? 'Home hub PINs need the home hub database update applied first.'
-          : error.message
+          : profile.role === 'parent' && error.code === '42501'
+            ? 'The hub kiosk lock needs its database update applied before a parent can set an unlock PIN.'
+            : error.message
       );
     } else {
       setProfile({ ...profile, hub_pin_set_at: new Date().toISOString() });
       setHubPin('');
       setHubPinConfirm('');
-      setHubPinMessage('PIN saved. Use it on the family tablet to mark your chores done.');
+      setHubPinMessage(
+        profile.role === 'parent'
+          ? 'Unlock PIN saved. On the family tablet it opens the parent app.'
+          : 'PIN saved. Use it on the family tablet to mark your chores done.'
+      );
     }
     setHubPinBusy(false);
   }
@@ -300,6 +306,23 @@ export default function ProfileScreen() {
   }
 
   const initials = profile.full_name.trim().slice(0, 1).toUpperCase() || '?';
+  const hubPinCopy = profile.role === 'parent'
+    ? {
+        title: 'Home hub parent lock',
+        caption: profile.hub_pin_set_at
+          ? 'Your unlock PIN is saved. On the shared tablet, parent controls stay locked until you type it. It is separate from your sign-in password.'
+          : 'Create a 4–6 digit PIN to unlock parent controls on the shared tablet. Kids keep using their own PIN to mark chores done. It is separate from your sign-in password.',
+        placeholder: profile.hub_pin_set_at ? 'New unlock PIN' : 'Unlock PIN',
+        button: profile.hub_pin_set_at ? 'Change unlock PIN' : 'Create unlock PIN',
+      }
+    : {
+        title: 'Home hub PIN',
+        caption: profile.hub_pin_set_at
+          ? 'Your PIN is saved. Type it on the family tablet to mark your chores done. It is separate from your sign-in password.'
+          : 'Create a 4–6 digit PIN for the family tablet, separate from your sign-in password. You will use it there to mark your chores done.',
+        placeholder: profile.hub_pin_set_at ? 'New PIN' : 'PIN',
+        button: profile.hub_pin_set_at ? 'Change PIN' : 'Create PIN',
+      };
 
   return (
     <SafeAreaView style={styles.container} edges={['top', 'left', 'right', 'bottom']}>
@@ -359,15 +382,10 @@ export default function ProfileScreen() {
           {!!nameError && <Text style={styles.error}>{nameError}</Text>}
         </View>
 
-        {profile.role === 'kid' && (
-          <View style={styles.card}>
-            <Text style={styles.cardTitle}>Home hub PIN</Text>
-            <Text style={styles.caption}>
-              {profile.hub_pin_set_at
-                ? 'Your PIN is saved. Type it on the family tablet to mark your chores done. It is separate from your sign-in password.'
-                : 'Create a 4–6 digit PIN for the family tablet, separate from your sign-in password. You will use it there to mark your chores done.'}
-            </Text>
-            <View style={styles.pinFields}>
+        <View style={styles.card}>
+          <Text style={styles.cardTitle}>{hubPinCopy.title}</Text>
+          <Text style={styles.caption}>{hubPinCopy.caption}</Text>
+          <View style={styles.pinFields}>
               <TextInput
                 style={[styles.input, styles.pinField]}
                 value={hubPin}
@@ -381,7 +399,7 @@ export default function ProfileScreen() {
                 autoComplete="off"
                 textContentType="none"
                 maxLength={6}
-                placeholder={profile.hub_pin_set_at ? 'New PIN' : 'PIN'}
+                placeholder={hubPinCopy.placeholder}
                 placeholderTextColor="#7E979E"
               />
               <TextInput
@@ -405,13 +423,12 @@ export default function ProfileScreen() {
               {hubPinBusy ? (
                 <ActivityIndicator color="#0C2127" />
               ) : (
-                <Text style={styles.primaryBtnText}>{profile.hub_pin_set_at ? 'Change PIN' : 'Create PIN'}</Text>
+                <Text style={styles.primaryBtnText}>{hubPinCopy.button}</Text>
               )}
             </TouchableOpacity>
             {!!hubPinMessage && <Text style={styles.message}>{hubPinMessage}</Text>}
             {!!hubPinError && <Text style={styles.error}>{hubPinError}</Text>}
-          </View>
-        )}
+        </View>
 
         <View style={styles.card}>
           <Text style={styles.cardTitle}>Sign-in email</Text>

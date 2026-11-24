@@ -9,7 +9,10 @@ export default function RootLayout() {
   return (
     <>
       <AnimatedSplashOverlay />
-      <Stack screenOptions={{ headerShown: false }} />
+      <Stack screenOptions={{ headerShown: false }}>
+        {/* The hub is a shared kiosk screen: no swipe-back into the parent app. */}
+        <Stack.Screen name="hub" options={{ gestureEnabled: false }} />
+      </Stack>
     </>
   );
 }
