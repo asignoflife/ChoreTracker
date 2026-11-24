@@ -409,7 +409,16 @@ export default function HomeScreen() {
   const availablePoints = Math.max(0, earnedPoints + adjustmentTotal - spentPoints);
   // A child marks a goal done ('pending'), and a parent confirms it ('achieved').
   const pendingGoals = goals.filter((goal) => goal.status === 'pending');
-  const kidGoals = goals.filter((goal) => goal.status === 'active' || goal.status === 'pending');
+  // An achieved goal stays on the child's dashboard for a week, so the win and
+  // the bonus it paid do not vanish the moment a parent confirms it.
+  const recentAchievementCutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+  const kidGoals = goals.filter((goal) =>
+    goal.status === 'active' ||
+    goal.status === 'pending' ||
+    (goal.status === 'achieved' &&
+      !!goal.achieved_at &&
+      new Date(goal.achieved_at).getTime() >= recentAchievementCutoff)
+  );
 
   async function handleCreateInvitation() {
     setInviteCode('');
@@ -918,17 +927,31 @@ export default function HomeScreen() {
             <>
               <Text style={styles.overviewHeading}>Your long-term goals</Text>
               {kidGoals.map((goal) => (
-                <View key={goal.id} style={styles.goalCard}>
+                <View key={goal.id} style={[styles.goalCard, goal.status === 'achieved' && styles.goalAchievedCard]}>
                   <View style={styles.goalRow}>
                     <Text style={styles.goalTitle}>{goal.title}</Text>
-                    <View style={[styles.goalBonus, goal.status === 'pending' && styles.goalWaitingBadge]}>
-                      <Text style={[styles.goalBonusText, goal.status === 'pending' && styles.goalWaitingText]}>
-                        {goal.status === 'pending' ? 'Waiting for a parent' : `+${goal.bonus_points} pts`}
+                    <View style={[
+                      styles.goalBonus,
+                      goal.status === 'pending' && styles.goalWaitingBadge,
+                      goal.status === 'achieved' && styles.goalAchievedBadge,
+                    ]}>
+                      <Text style={[
+                        styles.goalBonusText,
+                        goal.status === 'pending' && styles.goalWaitingText,
+                        goal.status === 'achieved' && styles.goalAchievedText,
+                      ]}>
+                        {goal.status === 'achieved'
+                          ? `+${goal.awarded_points} pts earned`
+                          : goal.status === 'pending' ? 'Waiting for a parent' : `+${goal.bonus_points} pts`}
                       </Text>
                     </View>
                   </View>
                   {!!goal.details && <Text style={styles.goalDetails}>{goal.details}</Text>}
-                  {goal.status === 'pending' ? (
+                  {goal.status === 'achieved' ? (
+                    <Text style={styles.goalHint}>
+                      Goal complete! A parent confirmed it and your {goal.awarded_points} bonus points are in your total.
+                    </Text>
+                  ) : goal.status === 'pending' ? (
                     <>
                       <Text style={styles.goalHint}>You marked this done. A parent will confirm it and add your {goal.bonus_points} bonus points.</Text>
                       <TouchableOpacity style={styles.goalTextBtn} onPress={() => handleKidGoalStatus(goal, 'active')} disabled={goalBusy}>
@@ -1819,6 +1842,9 @@ const styles = StyleSheet.create({
   goalHint: { color: '#7E979E', fontSize: 11, marginTop: 10 },
   goalWaitingBadge: { backgroundColor: '#3A2E24' },
   goalWaitingText: { color: '#F4A261' },
+  goalAchievedCard: { borderColor: '#2A9D8F' },
+  goalAchievedBadge: { backgroundColor: '#1E3B39' },
+  goalAchievedText: { color: '#5FC7BA' },
   goalDoneBtn: { backgroundColor: '#2A9D8F', borderRadius: 10, paddingVertical: 11, alignItems: 'center', marginTop: 12 },
   goalDoneBtnText: { color: '#0C2127', fontSize: 13, fontWeight: '800' },
   goalTextBtn: { marginTop: 10, paddingVertical: 4 },
